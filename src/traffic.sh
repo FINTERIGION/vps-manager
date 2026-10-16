@@ -17,7 +17,7 @@ traffic_pull() {
             | .up += ($d.uplink // 0)
             | .down += ($d.downlink // 0))' 2>/dev/null; then
         # Counters were already zeroed by -reset; keep the raw data for manual recovery
-        echo "$out" >"$ROOT/stats.lost.$(date +%s).json"
+        (umask 077; echo "$out" >"$ROOT/stats.lost.$(date +%s).json")
         warn "Failed to parse traffic stats, raw data saved to $ROOT/stats.lost.*.json"
         return 1
     fi
@@ -94,6 +94,7 @@ apply_state() {
 # Timer entry point: pull traffic -> re-evaluate -> apply changes
 sync_all() {
     local snap
+    fw_guard_ensure
     snap=$(state_snapshot)
     apply_state "$snap"
 }

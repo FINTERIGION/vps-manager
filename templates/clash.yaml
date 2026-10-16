@@ -59,16 +59,16 @@ proxy-groups:
     proxies:
       - DIRECT
       - Proxy
-  - name: Google
+  - name: Microsoft
     type: select
     proxies:
       - DIRECT
       - Proxy
-  - name: Telegram
+  - name: Steam
     type: select
     proxies:
-      - Proxy
       - DIRECT
+      - Proxy
   - name: AdBlock
     type: select
     proxies:
@@ -81,7 +81,8 @@ proxy-groups:
       - Proxy
       - DIRECT
 
-# Rule sets from Loyalsoldier/clash-rules (whitelist mode), updated automatically by the client
+# Rule sets from Loyalsoldier/clash-rules (whitelist mode) and MetaCubeX/meta-rules-dat (geosite),
+# updated automatically by the client
 rule-providers:
   reject:
     type: http
@@ -101,11 +102,29 @@ rule-providers:
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/apple.txt"
     path: ./ruleset/apple.yaml
     interval: 86400
-  google:
+  github:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/google.txt"
-    path: ./ruleset/google.yaml
+    url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/github.yaml"
+    path: ./ruleset/github.yaml
+    interval: 86400
+  microsoft:
+    type: http
+    behavior: domain
+    url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/microsoft.yaml"
+    path: ./ruleset/microsoft.yaml
+    interval: 86400
+  steam-cn:
+    type: http
+    behavior: domain
+    url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam@cn.yaml"
+    path: ./ruleset/steam-cn.yaml
+    interval: 86400
+  steam:
+    type: http
+    behavior: domain
+    url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam.yaml"
+    path: ./ruleset/steam.yaml
     interval: 86400
   proxy:
     type: http
@@ -137,12 +156,6 @@ rule-providers:
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/tld-not-cn.txt"
     path: ./ruleset/tld-not-cn.yaml
     interval: 86400
-  telegramcidr:
-    type: http
-    behavior: ipcidr
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/telegramcidr.txt"
-    path: ./ruleset/telegramcidr.yaml
-    interval: 86400
   cncidr:
     type: http
     behavior: ipcidr
@@ -169,14 +182,18 @@ rules:
   - RULE-SET,reject,AdBlock
   - RULE-SET,icloud,Apple
   - RULE-SET,apple,Apple
-  - RULE-SET,google,Google
+  - RULE-SET,github,Proxy
+  - RULE-SET,microsoft,Microsoft
+  - RULE-SET,steam-cn,DIRECT
+  - RULE-SET,steam,Steam
   - RULE-SET,proxy,Proxy
   - RULE-SET,gfw,Proxy
   - RULE-SET,tld-not-cn,Proxy
   - RULE-SET,direct,DIRECT
-  - RULE-SET,telegramcidr,Telegram,no-resolve
   - RULE-SET,lancidr,DIRECT,no-resolve
-  - RULE-SET,cncidr,DIRECT,no-resolve
+  # The CN IP rules resolve unmatched domains: domestic sites missing from the direct list would
+  # otherwise go through the proxy, and the server blocks Chinese IPs
+  - RULE-SET,cncidr,DIRECT
   - GEOIP,LAN,DIRECT,no-resolve
-  - GEOIP,CN,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT
   - MATCH,Final

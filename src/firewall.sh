@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # vpsm - iptables inbound firewall (allow only the required ports, reject everything else)
 #
-# All rules live in a dedicated chain jumped to from the top of INPUT, so rules managed by
+# All rules live in dedicated chains jumped to from the top of INPUT / OUTPUT, so rules managed by
 # other tools (Docker, etc.) are left untouched. Settings: .settings.firewall.{enabled,allow}
+# VPSM-OUT (the Xray API guard) is always loaded by vpsm-firewall.service; VPSM-IN only when enabled
 
 FW_CHAIN="VPSM-IN"
+FW_OUT_CHAIN="VPSM-OUT"
 FW_SVC="vpsm-firewall"
 
 fw_enabled() { [[ $(db_get '.settings.firewall.enabled // false') == true ]]; }
@@ -129,24 +131,36 @@ fw_rules() {
     echo "COMMIT"
 }
 
-# fw_load <iptables|ip6tables>: atomically replace VPSM-IN (--noflush only flushes the declared chain)
-fw_load() {
-    local ipt=$1 v=4
-    [[ $ipt == ip6tables ]] && v=6
-    fw_rules "$v" | "$ipt-restore" --noflush || return 1
-    "$ipt" -w -C INPUT -j "$FW_CHAIN" 2>/dev/null || "$ipt" -w -I INPUT 1 -j "$FW_CHAIN"
+# The Xray API has no authentication and can add users or reset traffic counters: only root (the
+# vpsm CLI) may connect to it. Proxied connections come from Xray's own user, so this also covers
+# DNS rebinding past the geoip:private routing rule. The API listens on 127.0.0.1 only, so IPv4 suffices
+fw_guard_rules() {
+    echo "*filter"
+    echo ":$FW_OUT_CHAIN - [0:0]"
+    echo "-A $FW_OUT_CHAIN -o lo -p tcp --dport $API_PORT -m owner ! --uid-owner 0 -j REJECT --reject-with tcp-reset"
+    echo "COMMIT"
 }
 
+# fw_load <iptables|ip6tables> <chain> <INPUT|OUTPUT>: atomically replace the chain from the
+# iptables-restore input on stdin (--noflush only flushes the declared chain), then hook it in
+fw_load() {
+    local ipt=$1 chain=$2 hook=$3
+    "$ipt-restore" --noflush || return 1
+    "$ipt" -w -C "$hook" -j "$chain" 2>/dev/null || "$ipt" -w -I "$hook" 1 -j "$chain"
+}
+
+# fw_unload <iptables|ip6tables> <chain> <INPUT|OUTPUT>
 fw_unload() {
-    local ipt=$1
+    local ipt=$1 chain=$2 hook=$3
     cmd_exists "$ipt" || return 0
-    while "$ipt" -w -D INPUT -j "$FW_CHAIN" 2>/dev/null; do :; done
-    "$ipt" -w -F "$FW_CHAIN" 2>/dev/null
-    "$ipt" -w -X "$FW_CHAIN" 2>/dev/null
+    while "$ipt" -w -D "$hook" -j "$chain" 2>/dev/null; do :; done
+    "$ipt" -w -F "$chain" 2>/dev/null
+    "$ipt" -w -X "$chain" 2>/dev/null
     return 0
 }
 
-fw_loaded() { cmd_exists "$1" && "$1" -w -C INPUT -j "$FW_CHAIN" 2>/dev/null; }
+# fw_loaded <iptables|ip6tables> [chain] [hook]
+fw_loaded() { cmd_exists "$1" && "$1" -w -C "${3:-INPUT}" -j "${2:-$FW_CHAIN}" 2>/dev/null; }
 
 fw_apply() {
     if [[ -n ${VPSM_NO_SERVICE:-} ]]; then
@@ -155,20 +169,53 @@ fw_apply() {
         fw_has_v6 && { msg "(dry run, skipped) ip6tables-restore --noflush:"; fw_rules 6; }
         return 0
     fi
-    fw_load iptables || err "Failed to load IPv4 firewall rules"
+    fw_rules 4 | fw_load iptables "$FW_CHAIN" INPUT || err "Failed to load IPv4 firewall rules"
     if fw_has_v6; then
         if ! cmd_exists ip6tables; then
             warn "ip6tables not found, IPv6 inbound traffic is NOT filtered"
-        elif ! fw_load ip6tables; then
+        elif ! fw_rules 6 | fw_load ip6tables "$FW_CHAIN" INPUT; then
             warn "Failed to load IPv6 firewall rules, IPv6 inbound traffic is NOT filtered"
         fi
     fi
 }
 
-fw_flush_all() {
+fw_guard_apply() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    cmd_exists iptables-restore || return 1
+    fw_guard_rules | fw_load iptables "$FW_OUT_CHAIN" OUTPUT
+}
+
+# Called by the traffic timer: installs upgraded from older versions (and rules flushed by other
+# tools) get the guard back without a reboot. Quiet, since it runs every minute
+fw_guard_ensure() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    cmd_exists iptables || return 0
+    fw_loaded iptables "$FW_OUT_CHAIN" OUTPUT || fw_guard_apply >/dev/null 2>&1
+    systemctl is-enabled --quiet "$FW_SVC" 2>/dev/null || systemctl enable --quiet "$FW_SVC" 2>/dev/null
+    return 0
+}
+
+fw_guard_text() {
+    if [[ -n ${VPSM_NO_SERVICE:-} ]]; then
+        echo "unknown (dry run)"
+    elif fw_loaded iptables "$FW_OUT_CHAIN" OUTPUT; then
+        echo "active"
+    else
+        echo "NOT active (run vpsm firewall reload)"
+    fi
+}
+
+# Remove the inbound whitelist only (firewall off); the API guard stays
+fw_flush_input() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && { msg "(dry run, skipped) remove $FW_CHAIN rules"; return 0; }
-    fw_unload iptables
-    fw_unload ip6tables
+    fw_unload iptables "$FW_CHAIN" INPUT
+    fw_unload ip6tables "$FW_CHAIN" INPUT
+}
+
+fw_flush_all() {
+    fw_flush_input
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    fw_unload iptables "$FW_OUT_CHAIN" OUTPUT
 }
 
 # Re-apply the rules if the firewall is enabled (call after changing ports)
@@ -193,6 +240,7 @@ fw_state_text() {
 
 fw_status() {
     echo "Firewall: $(fw_state_text)"
+    echo "Xray API guard (always on): $(fw_guard_text)"
     echo "Allowed inbound ports (everything else is rejected and ping is blocked when enabled):"
     fw_list
 }
@@ -220,17 +268,18 @@ fw_enable() {
         done
     fi
     fw_apply
+    fw_guard_apply || warn "Failed to load the Xray API guard rule"
     db_write '.settings.firewall.enabled = true'
     svc enable "$FW_SVC" >/dev/null 2>&1 || warn "Failed to enable $FW_SVC, rules will not be restored after reboot"
     ok "Firewall enabled (rules are restored automatically on boot)"
     msg "Also allow these ports in your VPS provider's security group, if it has one"
 }
 
+# The service stays enabled: it also restores the Xray API guard on boot
 fw_disable() {
     db_write '.settings.firewall.enabled = false'
-    svc disable --now "$FW_SVC" >/dev/null 2>&1
-    fw_flush_all
-    ok "Firewall disabled, all vpsm iptables rules removed"
+    fw_flush_input
+    ok "Firewall disabled, inbound whitelist removed (the Xray API guard stays active)"
 }
 
 fw_allow() {
@@ -257,12 +306,13 @@ fw_deny() {
 
 # Boot entry point (vpsm-firewall.service), also used to re-apply manually
 fw_reload() {
+    fw_enabled && fw_ensure_tools
+    fw_guard_apply || warn "Failed to load the Xray API guard rule (iptables owner match unavailable?)"
     if fw_enabled; then
-        fw_ensure_tools
         fw_apply
         ok "Firewall rules loaded"
     else
-        fw_flush_all
+        fw_flush_input
     fi
 }
 

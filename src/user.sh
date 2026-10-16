@@ -31,9 +31,9 @@ require_user() {
 user_add() {
     local name=${1:-} quota expire snap
     [[ -n $name ]] || err "Usage: vpsm add <name> [quota e.g. 200G, 0=unlimited] [expiry e.g. 30d / 2026-12-31, 0=never]"
-    valid_name "$name" || err "Username may only contain letters, digits, underscores and hyphens, length 1-32"
+    valid_name "$name" || err "Username may only contain letters, digits, underscores and hyphens, length 1-32 (\"all\" is reserved)"
     user_exists "$name" && err "User $name already exists"
-    quota=$(parse_quota "${2:-0}") || err "Invalid traffic format: ${2:-}, examples: 200G / 500M / 1.5T / 0"
+    quota=$(parse_quota "${2:-0}") || err "Invalid traffic: ${2:-}, examples: 200G / 500M / 1.5T / 0 (max 1024T)"
     expire=$(parse_expire "${3:-0}") || err "Invalid expiry format: ${3:-}, examples: 30d / 6m / 1y / 2026-12-31 / 0"
     snap=$(state_snapshot)
     db_write --arg name "$name" --arg uuid "$(gen_uuid)" --arg token "$(gen_hex 16)" \
@@ -119,7 +119,7 @@ user_url() {
     local domain port
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
-    echo "vless://$(user_get "$1" '.uuid')@$domain:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain&fp=chrome&pbk=$(db_get '.settings.public_key')&sid=$(db_get '.settings.short_ids[0]')&type=tcp#$domain-$1"
+    echo "vless://$(user_get "$1" '.uuid')@$domain:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain&fp=chrome&pbk=$(db_get '.settings.public_key')&sid=$(db_get '.settings.short_ids[0]')&type=tcp#$(urlencode "$(node_name)")"
 }
 
 user_qr() {
@@ -132,7 +132,7 @@ user_quota() {
     require_user "${1:-}"
     [[ -n ${2:-} ]] || err "Usage: vpsm quota <name> <traffic e.g. 200G, 0=unlimited>"
     local quota snap
-    quota=$(parse_quota "$2") || err "Invalid traffic format: $2"
+    quota=$(parse_quota "$2") || err "Invalid traffic: $2, examples: 200G / 500M / 1.5T / 0 (max 1024T)"
     snap=$(state_snapshot)
     db_write --arg n "$1" --argjson q "$quota" '.users |= map(if .name == $n then .quota = $q else . end)'
     apply_state "$snap" force
@@ -219,6 +219,11 @@ set_reset_day() {
 set_port() {
     valid_port "${1:-}" || err "Usage: vpsm port <1-65535>"
     valid_xray_port "$1" || err "Port $1 is used internally by vpsm (80 / $CADDY_PORT / $API_PORT), choose another"
+    if (($1 == $(db_get '.settings.port'))); then
+        msg "Listen port is already $1"
+        return 0
+    fi
+    [[ -z ${VPSM_NO_SERVICE:-} ]] && port_in_use "$1" && err "Port $1 is already in use by another program (ss -ltnp 'sport = :$1')"
     db_write --argjson p "$1" '.settings.port = $p'
     fw_refresh
     xray_gen_config
@@ -242,11 +247,41 @@ set_domain() {
     ok "Domain changed to $1, Caddy will obtain a certificate for it automatically"
 }
 
-# vpsm key [private_key]: without an argument, generate a new key pair (all clients must refresh subscriptions)
+# vpsm name [name|0]: node name and subscription name shown in clients (both are the same);
+# without an argument show the current one, 0 restores the default (the domain)
+set_node_name() {
+    local n="$*"
+    n="${n#"${n%%[![:space:]]*}"}"
+    n="${n%"${n##*[![:space:]]}"}"
+    if [[ -z $n ]]; then
+        echo "Node/subscription name: $(node_name)"
+        return 0
+    fi
+    if [[ $n == 0 ]]; then
+        n=""
+    else
+        valid_node_name "$n" || err "Invalid name: 1-64 characters without quotes, backslashes or control characters, and not a Clash policy/group name (DIRECT, REJECT, Proxy, Final ...)"
+    fi
+    db_write --arg n "$n" '.settings.name = $n'
+    sub_regen force
+    ok "Node/subscription name set to $(node_name) (clients pick it up after refreshing; some only use the subscription name on first import)"
+}
+
+# vpsm key [private_key|-]: without an argument, generate a new key pair (all clients must refresh subscriptions);
+# "-" reads the private key from stdin, keeping it out of the shell history
 set_key() {
-    local pair priv pub
-    if [[ -n ${1:-} ]]; then
-        pair=$(gen_x25519 -i "$1") || err "Invalid private key"
+    local pair priv pub key=${1:-}
+    if [[ $key == - ]]; then
+        if [[ -t 0 ]]; then
+            read -r -s -p "Private key: " key
+            echo
+        else
+            read -r key
+        fi
+        [[ -n $key ]] || err "No private key given"
+    fi
+    if [[ -n $key ]]; then
+        pair=$(gen_x25519 -i "$key") || err "Invalid private key"
     else
         pair=$(gen_x25519) || err "Failed to generate key pair"
     fi
@@ -273,6 +308,8 @@ set_shortid() {
 # Regenerate all configs (config.json / Caddyfile / subscriptions)
 regen_all() {
     xray_gen_config
+    # Later syncs see an unchanged config.json, so the running Xray must pick it up now
+    [[ -n $XRAY_CONF_CHANGED ]] && xray_active && xray_restart
     caddy_gen
     sub_regen force
     caddy_reload
@@ -284,7 +321,7 @@ edit_rules() {
     if [[ ! -f $CUSTOM_RULES ]]; then
         cat >"$CUSTOM_RULES" <<'EOF'
 # Custom Clash rules, one per line, inserted before all built-in rules (highest priority)
-# Available policy groups: Proxy / Apple / Google / Telegram / AdBlock / Final / DIRECT / REJECT
+# Available policy groups: Proxy / Apple / Microsoft / Steam / AdBlock / Final / DIRECT / REJECT
 # Examples:
 # DOMAIN-SUFFIX,example.com,Proxy
 # DOMAIN-KEYWORD,tracker,AdBlock

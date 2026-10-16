@@ -1,5 +1,5 @@
 [Unit]
-Description=vpsm firewall (iptables inbound whitelist)
+Description=vpsm firewall (Xray API guard + optional iptables inbound whitelist)
 DefaultDependencies=no
 Wants=network-pre.target
 Before=network-pre.target shutdown.target

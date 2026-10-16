@@ -83,10 +83,12 @@ show_status() {
     echo "Xray version:  ${ver:-unknown}"
     echo "Caddy version: $(cat "$BIN_DIR/caddy.version" 2>/dev/null || echo unknown)"
     echo "Domain/port:   $(db_get '.settings.domain'):$(db_get '.settings.port')"
+    echo "Node name:     $(node_name)"
     echo "Users:         $(db_get '.users | length') ($(db_get '[.users[] | select(.enabled)] | length') enabled)"
     echo "Reset day:     day $(db_get '.settings.reset_day') of each month (next: $(next_reset_date))"
     echo "Sync timer:    $(systemctl is-active vpsm-traffic.timer 2>/dev/null)"
     echo "Firewall:      $(fw_state_text)"
+    echo "API guard:     $(fw_guard_text)"
 }
 
 show_log() {
@@ -98,18 +100,38 @@ show_log() {
     esac
 }
 
+# install_xray/install_caddy keep the previous version as *.old: roll back to it if the new one does not stay up
 update_core() {
+    local files=(xray geoip.dat xray.version) new
     xray_active && traffic_pull
     install_xray "${1:-}"
-    xray_gen_config
-    svc restart "$XRAY_SVC"
-    ok "Xray updated to $(cat "$BIN_DIR/xray.version")"
+    new=$(cat "$BIN_DIR/xray.version")
+    if (xray_gen_config) && svc restart "$XRAY_SVC" && svc_settled "$XRAY_SVC"; then
+        bin_drop_backup "${files[@]}"
+        ok "Xray updated to $new"
+        return 0
+    fi
+    bin_restore "${files[@]}" ||
+        err "Xray $new failed to start and there is no previous version to roll back to, check: journalctl -u $XRAY_SVC -n 50"
+    xray_restart
+    warn "Xray $new failed to start, rolled back to $(cat "$BIN_DIR/xray.version"); check: journalctl -u $XRAY_SVC -n 50"
+    return 1
 }
 
 update_caddy() {
+    local files=(caddy caddy.version) new
     install_caddy "${1:-}"
+    new=$(cat "$BIN_DIR/caddy.version")
+    if svc restart "$CADDY_SVC" && svc_settled "$CADDY_SVC"; then
+        bin_drop_backup "${files[@]}"
+        ok "Caddy updated to $new"
+        return 0
+    fi
+    bin_restore "${files[@]}" ||
+        err "Caddy $new failed to start and there is no previous version to roll back to, check: journalctl -u $CADDY_SVC -n 50"
     svc restart "$CADDY_SVC"
-    ok "Caddy updated to $(cat "$BIN_DIR/caddy.version")"
+    warn "Caddy $new failed to start, rolled back to $(cat "$BIN_DIR/caddy.version"); check: journalctl -u $CADDY_SVC -n 50"
+    return 1
 }
 
 # Re-fetch the scripts from GitHub. $ROOT/repo contains "owner/repo [ref]"
@@ -137,8 +159,10 @@ update_sh() {
     rm -rf "$ROOT/sh.old" "$tmp"
     install_units
     restart_changed_units
-    ok "Scripts updated"
-    msg "The new version takes effect the next time vpsm runs; run vpsm regen if templates changed"
+    # Regenerate with the new scripts so template/Caddyfile changes apply now; they inherit our lock
+    VPSM_LOCK_HELD=1 "$ROOT/sh/vpsm.sh" regen ||
+        warn "Failed to regenerate configs with the new scripts, run: vpsm regen"
+    ok "Scripts updated to $("$ROOT/sh/vpsm.sh" version)"
 }
 
 update_cmd() {
@@ -217,7 +241,8 @@ Global settings:
    reset-day <1-28>              Monthly traffic reset day shared by all users
    port <port>                   Xray listen port (default 443)
    domain <domain>               Change the domain (also the Reality SNI)
-   key [private_key]             Regenerate/set the Reality key pair
+   name [name|0]                 Show/set the node name = subscription name shown in clients (0=use the domain)
+   key [private_key|-]           Regenerate/set the Reality key pair (- reads the private key from stdin)
    shortid [hex]                 Regenerate/set the shortId
    rules                         Edit custom Clash routing rules
    regen                         Regenerate Xray/Caddy configs and all subscriptions
@@ -228,9 +253,10 @@ Firewall (iptables, allows only SSH / 80 / Xray port + custom ports, rejects all
    firewall allow <port>[/proto] Allow an extra inbound port, e.g. 8080, 53/udp, 10000-20000/udp
    firewall deny <port>[/proto]  Remove a custom allowed port
    firewall reload               Re-apply the rules
+   (Independently of on/off, an always-on rule lets only root reach the Xray API port $API_PORT)
 
 Operations:
-   sync                          Sync traffic and check quota/expiry now (the timer runs this every 5 minutes)
+   sync                          Sync traffic and check quota/expiry now (the timer runs this every minute)
    status                        Service status
    start|stop|restart [xray|caddy|all]
    log [xray|caddy|sync]         View logs

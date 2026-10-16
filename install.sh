@@ -14,6 +14,7 @@ Usage:
 Options (env variable in brackets; no prompts when all are given):
   --domain <domain>    Domain already resolving to this host (Reality SNI, also used by Caddy for TLS) [VPSM_DOMAIN]
   --port <port>        Public Xray listen port, default 443 [VPSM_PORT]
+  --name <name>        Node name = subscription name shown in clients, default the domain [VPSM_NAME]
   --user <name>        First user, default admin [VPSM_USER]
   --quota <traffic>    Monthly traffic of the first user, e.g. 200G, 0=unlimited, default 0 [VPSM_QUOTA]
   --expire <expiry>    Expiry of the first user, e.g. 30d / 2026-12-31, 0=never, default 0 [VPSM_EXPIRE]
@@ -29,6 +30,7 @@ REPO="${VPSM_REPO:-FINTERIGION/vps-manager}"
 REF="${VPSM_REF:-main}"
 DOMAIN="${VPSM_DOMAIN:-}"
 PORT="${VPSM_PORT:-}"
+NODE_NAME="${VPSM_NAME:-}"
 FIRST_USER="${VPSM_USER:-}"
 QUOTA="${VPSM_QUOTA:-}"
 EXPIRE="${VPSM_EXPIRE:-}"
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --domain) DOMAIN=$2; shift 2 ;;
         --port) PORT=$2; shift 2 ;;
+        --name) NODE_NAME=$2; shift 2 ;;
         --user) FIRST_USER=$2; shift 2 ;;
         --quota) QUOTA=$2; shift 2 ;;
         --expire) EXPIRE=$2; shift 2 ;;
@@ -55,7 +58,11 @@ done
 
 [[ $EUID -eq 0 || -n ${VPSM_NO_SERVICE:-} ]] || die "Please run as root"
 [[ -n ${VPSM_NO_SERVICE:-} ]] || { [[ -d /run/systemd/system ]] || die "systemd is required"; }
-[[ -f $VPSM_ROOT/users.json ]] && die "Existing installation found ($VPSM_ROOT/users.json); use vpsm update to upgrade, or vpsm uninstall before reinstalling"
+# .installing exists until the installer finishes, so a failed run can simply be repeated
+if [[ -s $VPSM_ROOT/users.json && ! -f $VPSM_ROOT/.installing ]]; then
+    die "Existing installation found ($VPSM_ROOT/users.json); use vpsm update to upgrade, or vpsm uninstall before reinstalling"
+fi
+[[ -f $VPSM_ROOT/.installing ]] && echo "Resuming an unfinished installation in $VPSM_ROOT"
 
 # ask <var_name> <prompt> <default>
 ask() {
@@ -76,6 +83,7 @@ install_deps() {
         command -v "$c" >/dev/null 2>&1 || need+=("$c")
     done
     command -v qrencode >/dev/null 2>&1 || need+=(qrencode)
+    command -v iptables >/dev/null 2>&1 || need+=(iptables)
     [[ ${#need[@]} -eq 0 ]] && return 0
     # flock/timeout come from util-linux / coreutils
     local pkgs=() p
@@ -115,13 +123,12 @@ fetch_scripts() {
     SRC_DIR=$DL_TMP
 }
 
-port_in_use() { command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
-
 # ================= Start =================
 install_deps
 fetch_scripts
 
 mkdir -p "$VPSM_ROOT/sh"
+touch "$VPSM_ROOT/.installing"
 if [[ $SRC_DIR != "$VPSM_ROOT/sh" ]]; then
     cp -r "$SRC_DIR/vpsm.sh" "$SRC_DIR/src" "$SRC_DIR/templates" "$SRC_DIR/systemd" "$VPSM_ROOT/sh/" ||
         die "Failed to copy scripts to $VPSM_ROOT/sh"
@@ -142,10 +149,12 @@ valid_domain "$DOMAIN" || die "Invalid domain: $DOMAIN"
 ask PORT "Xray listen port" 443
 valid_port "$PORT" || die "Invalid port: $PORT"
 valid_xray_port "$PORT" || die "Port $PORT is used internally by vpsm (80 / $CADDY_PORT / $API_PORT), choose another"
+ask NODE_NAME "Node/subscription name shown in clients" "$DOMAIN"
+valid_node_name "$NODE_NAME" || die "Invalid name: $NODE_NAME (1-64 characters without quotes, backslashes or control characters, and not a Clash policy/group name)"
 ask FIRST_USER "First username" admin
-valid_name "$FIRST_USER" || die "Username may only contain letters, digits, underscores and hyphens"
+valid_name "$FIRST_USER" || die "Username may only contain letters, digits, underscores and hyphens, length 1-32 (\"all\" is reserved)"
 ask QUOTA "Monthly traffic for this user (e.g. 200G, 0=unlimited)" 0
-parse_quota "$QUOTA" >/dev/null || die "Invalid traffic format: $QUOTA"
+parse_quota "$QUOTA" >/dev/null || die "Invalid traffic: $QUOTA (e.g. 200G / 500M / 1.5T / 0, max 1024T)"
 ask EXPIRE "Expiry for this user (e.g. 30d / 2026-12-31, 0=never)" 0
 parse_expire "$EXPIRE" >/dev/null || die "Invalid expiry format: $EXPIRE"
 ask RESET_DAY "Monthly traffic reset day (1-28, shared by all users)" 1
@@ -178,11 +187,14 @@ chmod 755 "$VPSM_ROOT"
 
 install_xray
 install_caddy
+bin_drop_backup xray geoip.dat xray.version caddy caddy.version
 
 pair=$(gen_x25519) || die "Failed to generate Reality key pair"
 priv=$(sed -n 1p <<<"$pair")
 pub=$(sed -n 2p <<<"$pair")
 db_init "$DOMAIN" "$PORT" "$priv" "$pub" "$(gen_hex 4)" "$RESET_DAY"
+# Left unset when it equals the domain, so the name keeps following later domain changes
+[[ $NODE_NAME != "$DOMAIN" ]] && db_write --arg n "$NODE_NAME" '.settings.name = $n'
 
 caddy_gen
 if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
@@ -196,7 +208,7 @@ user_add "$FIRST_USER" "$QUOTA" "$EXPIRE" || die "Failed to create user"
 fix_perms
 
 if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
-    systemctl enable --now "$XRAY_SVC" "$CADDY_SVC" vpsm-traffic.timer
+    systemctl enable --now "$FW_SVC" "$XRAY_SVC" "$CADDY_SVC" vpsm-traffic.timer
     sleep 2
     for s in "$XRAY_SVC" "$CADDY_SVC"; do
         systemctl is-active --quiet "$s" || warn "$s failed to start, check: journalctl -u $s -n 50"
@@ -205,6 +217,7 @@ fi
 if [[ -n $FIREWALL ]]; then
     (fw_enable --yes) || warn "Failed to enable the firewall, retry later with: vpsm firewall on"
 fi
+rm -f "$VPSM_ROOT/.installing"
 
 cat <<EOF
 
@@ -216,7 +229,7 @@ Notes:
  1. Allow TCP 80 (Caddy certificate issuance) and TCP $PORT (node/subscription) in your firewall
  2. The first certificate request may take tens of seconds; the subscription link is unavailable until then (vpsm log caddy shows progress)
  3. Subscriptions use the Clash Meta / Mihomo format (original Clash does not support VLESS Reality)
- 4. Traffic is synced every 5 minutes; all users' traffic resets on day $RESET_DAY of each month
+ 4. Traffic is synced every minute; all users' traffic resets on day $RESET_DAY of each month
  5. Firewall: $(fw_state_text) (vpsm firewall on|off|allow <port> to manage)
 =======================================================
 EOF

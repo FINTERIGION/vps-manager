@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 # vpsm - Xray config generation and runtime user management
 
+# Addresses of this host's interfaces as a JSON array. geoip:private does not cover them, so without this
+# proxied users could reach services bound to the public IP. Temporary IPv6 addresses rotate and are skipped
+# to keep config.json stable
+self_ips() {
+    { ip -o addr show scope global 2>/dev/null || true; } |
+        awk '!/ temporary/ {sub(/\/.*/, "", $4); print $4}' | sort -u | jq -Rnc '[inputs]'
+}
+
 # Generate config.json from users.json (enabled users only) and validate it with xray -test.
 # Sets XRAY_CONF_CHANGED=1 when the file was rewritten; an unchanged config skips validation
 xray_gen_config() {
     local tmp errf
     XRAY_CONF_CHANGED=""
     tmp=$(mktemp "$ROOT/.cfg.XXXXXX.json") || err "Failed to create temporary file"
-    if ! jq --argjson apiport "$API_PORT" --arg tag "$INBOUND_TAG" --arg dest "127.0.0.1:$CADDY_PORT" '
+    if ! jq --argjson apiport "$API_PORT" --arg tag "$INBOUND_TAG" --arg dest "127.0.0.1:$CADDY_PORT" \
+        --argjson selfips "$(self_ips)" '
         .settings as $s | {
           log: {loglevel: "warning", access: "none"},
           stats: {},
@@ -35,7 +44,8 @@ xray_gen_config() {
           routing: {domainStrategy: "IPIfNonMatch", rules: [
             {type: "field", inboundTag: ["api"], outboundTag: "api"},
             {type: "field", protocol: ["bittorrent"], outboundTag: "block"},
-            {type: "field", ip: ["geoip:private", "geoip:cn"], outboundTag: "block"}
+            {type: "field", port: "25", outboundTag: "block"},
+            {type: "field", ip: (["geoip:private", "geoip:cn"] + $selfips), outboundTag: "block"}
           ]}
         }' "$DB" >"$tmp"; then
         rm -f "$tmp"
@@ -43,7 +53,6 @@ xray_gen_config() {
     fi
     if cmp -s "$tmp" "$XRAY_CONF"; then
         rm -f "$tmp"
-        fix_perms
         return 0
     fi
     if [[ -x $XRAY_BIN ]]; then
@@ -57,7 +66,7 @@ xray_gen_config() {
     else
         warn "$XRAY_BIN not found, skipping config validation"
     fi
-    chmod 640 "$tmp"
+    chmod 600 "$tmp"
     mv -f "$tmp" "$XRAY_CONF"
     XRAY_CONF_CHANGED=1
     fix_perms

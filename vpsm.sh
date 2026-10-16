@@ -16,9 +16,10 @@ pause() { read -r -s -n 1 -p "Press any key to return to the menu..." _ && echo;
 # Read one value in the menu; empty input returns empty
 ask() { local v; read -r -p "$1" v; echo "$v"; }
 
+# pick_user [prompt]: list users, then read a username
 pick_user() {
     run_locked user_list >&2
-    ask "Username: "
+    ask "${1:-Username: }"
 }
 
 menu() {
@@ -27,9 +28,9 @@ menu() {
         clear
         cat <<EOF
 ===== vpsm $VPSM_VERSION =====
- 1) Add user            2) Delete user         3) List users
- 4) User info/sub       5) Set traffic quota   6) Set expiry
- 7) Reset user traffic  8) Enable/disable user 9) Set monthly reset day
+ 1) Add user            2) Delete user         3) User info/sub
+ 4) Set traffic quota   5) Set expiry          6) Reset user traffic
+ 7) Enable/disable user 8) Monthly reset day   9) Set node name
 10) Reset sub link     11) Edit routing rules 12) Status
 13) Restart services   14) View logs          15) Update
 16) Enable BBR         17) Firewall           18) Uninstall
@@ -40,14 +41,18 @@ EOF
             1) n=$(ask "Username: "); a=$(ask "Monthly traffic (e.g. 200G, 0=unlimited) [0]: "); b=$(ask "Expiry (e.g. 30d / 2026-12-31, 0=never) [0]: ")
                run_locked user_add "$n" "${a:-0}" "${b:-0}" ;;
             2) n=$(pick_user); run_locked user_del "$n" ;;
-            3) run_locked user_list ;;
-            4) n=$(pick_user); run_locked user_info "$n" ;;
-            5) n=$(pick_user); a=$(ask "New monthly traffic (e.g. 200G, 0=unlimited): "); run_locked user_quota "$n" "$a" ;;
-            6) n=$(pick_user); a=$(ask "New expiry (2026-12-31 / 30d / +30d / 0): "); run_locked user_expire "$n" "$a" ;;
-            7) n=$(pick_user); run_locked user_reset "$n" ;;
-            8) n=$(pick_user); a=$(ask "Enable (e) or disable (d)? [e/d]: ")
+            3) n=$(pick_user "Username for details/subscription (Enter to return): ")
+               [[ -n $n ]] && run_locked user_info "$n" ;;
+            4) n=$(pick_user); a=$(ask "New monthly traffic (e.g. 200G, 0=unlimited): "); run_locked user_quota "$n" "$a" ;;
+            5) n=$(pick_user); a=$(ask "New expiry (2026-12-31 / 30d / +30d / 0): "); run_locked user_expire "$n" "$a" ;;
+            6) n=$(pick_user); run_locked user_reset "$n" ;;
+            7) n=$(pick_user); a=$(ask "Enable (e) or disable (d)? [e/d]: ")
                if [[ $a == d ]]; then run_locked user_disable "$n"; else run_locked user_enable "$n"; fi ;;
-            9) a=$(ask "Monthly reset day (1-28): "); run_locked set_reset_day "$a" ;;
+            8) a=$(ask "Monthly reset day (1-28): "); run_locked set_reset_day "$a" ;;
+            9) run_locked set_node_name
+               a=$(ask "New node/subscription name (0 = use the domain, Enter to return): ")
+               [[ -n $a ]] || continue
+               run_locked set_node_name "$a" ;;
             10) n=$(pick_user); run_locked user_token "$n" ;;
             11) (edit_rules) ;;
             12) (show_status) ;;
@@ -100,6 +105,7 @@ main() {
         reset-day | resetday) run_locked set_reset_day "$@" ;;
         port) run_locked set_port "$@" ;;
         domain | sni) run_locked set_domain "$@" ;;
+        name) run_locked set_node_name "$@" ;;
         key) run_locked set_key "$@" ;;
         shortid) run_locked set_shortid "$@" ;;
         rules) edit_rules ;;
