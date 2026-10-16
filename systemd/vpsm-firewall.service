@@ -1,0 +1,17 @@
+[Unit]
+Description=vpsm firewall (iptables inbound whitelist)
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+After=local-fs.target systemd-modules-load.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=VPSM_ROOT=@ROOT@
+ExecStart=@ROOT@/sh/vpsm.sh firewall reload
+ExecStop=@ROOT@/sh/vpsm.sh firewall flush
+
+[Install]
+WantedBy=multi-user.target

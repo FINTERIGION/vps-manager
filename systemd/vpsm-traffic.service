@@ -1,0 +1,10 @@
+[Unit]
+Description=vpsm traffic sync (quota / expiry / monthly reset)
+After=vpsm-xray.service
+
+[Service]
+Type=oneshot
+Environment=VPSM_ROOT=@ROOT@
+Environment=HOME=/root
+ExecStart=@ROOT@/sh/vpsm.sh sync
+Nice=10

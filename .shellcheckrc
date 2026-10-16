@@ -1,0 +1,5 @@
+# SC2034: variables are used by other sourced files
+# SC2016: jq filters must be single-quoted; $var is a jq variable
+# SC2015: A && B || err is used as an assertion
+disable=SC2034,SC2016,SC2015
+shell=bash

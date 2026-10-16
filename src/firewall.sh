@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# vpsm - iptables inbound firewall (allow only the required ports, reject everything else)
+#
+# All rules live in a dedicated chain jumped to from the top of INPUT, so rules managed by
+# other tools (Docker, etc.) are left untouched. Settings: .settings.firewall.{enabled,allow}
+
+FW_CHAIN="VPSM-IN"
+FW_SVC="vpsm-firewall"
+
+fw_enabled() { [[ $(db_get '.settings.firewall.enabled // false') == true ]]; }
+fw_has_v6() { [[ -e /proc/net/if_inet6 ]]; }
+
+fw_ensure_tools() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    cmd_exists iptables && cmd_exists iptables-restore && return 0
+    msg "Installing iptables ..."
+    if cmd_exists apt-get; then
+        apt-get update -y >/dev/null 2>&1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables >/dev/null
+    elif cmd_exists dnf; then
+        dnf install -y iptables >/dev/null
+    elif cmd_exists yum; then
+        yum install -y iptables >/dev/null
+    fi
+    cmd_exists iptables && cmd_exists iptables-restore || err "iptables is not available, please install it manually"
+}
+
+# fw_parse_spec <port|from-to>[/tcp|/udp]: prints the normalized "port/proto" (protocol defaults to tcp)
+fw_parse_spec() {
+    local s=${1,,} a b="" proto
+    [[ $s =~ ^([0-9]{1,5})(-([0-9]{1,5}))?(/(tcp|udp))?$ ]] || return 1
+    a=$((10#${BASH_REMATCH[1]}))
+    [[ -n ${BASH_REMATCH[3]} ]] && b=$((10#${BASH_REMATCH[3]}))
+    proto=${BASH_REMATCH[5]:-tcp}
+    valid_port "$a" || return 1
+    if [[ -n $b ]]; then
+        valid_port "$b" && ((a < b)) || return 1
+        echo "$a-$b/$proto"
+    else
+        echo "$a/$proto"
+    fi
+}
+
+# Ports sshd is configured to listen on (falls back to 22)
+fw_sshd_ports() {
+    local ports
+    if cmd_exists sshd; then
+        ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
+    fi
+    if [[ -z $ports ]]; then
+        ports=$(cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null |
+            awk 'tolower($1) == "port" && $2 ~ /^[0-9]+$/ {print $2}')
+    fi
+    echo "${ports:-22}" | sort -un
+}
+
+# Ports SSH is actually reachable on right now: the current session (SSH_CONNECTION is dropped by sudo),
+# sshd's listeners and ssh.socket (socket activation, e.g. Ubuntu 24.04). These can differ from
+# sshd_config until sshd / ssh.socket is restarted
+fw_ssh_live_ports() {
+    local u
+    {
+        [[ -n ${SSH_CONNECTION:-} ]] && awk '{print $4}' <<<"$SSH_CONNECTION"
+        if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
+            cmd_exists ss && ss -ltnpH 2>/dev/null | awk '/users:\(\("sshd"/ {n = split($4, a, ":"); print a[n]}'
+            for u in ssh.socket sshd.socket; do
+                systemctl is-active --quiet "$u" 2>/dev/null &&
+                    systemctl show -p Listen --value "$u" 2>/dev/null | sed -nE 's/.*:([0-9]+) \(Stream\).*/\1/p'
+            done
+        fi
+    } | awk '/^[0-9]+$/' | sort -un
+}
+
+# Configured plus live SSH ports, so enabling the firewall over SSH never locks you out
+fw_ssh_ports() {
+    {
+        fw_sshd_ports
+        fw_ssh_live_ports
+    } | sort -un
+}
+
+# Allowed inbound ports, one "port/proto<TAB>description" per line
+fw_allowed() {
+    local p
+    {
+        for p in $(fw_ssh_ports); do printf '%s/tcp\tSSH\n' "$p"; done
+        printf '80/tcp\tCaddy certificate issuance (ACME HTTP-01)\n'
+        printf '%s/tcp\tXray (VLESS Reality) / subscriptions\n' "$(db_get '.settings.port')"
+        db_get '.settings.firewall.allow // [] | .[] | "\(.)\tcustom"'
+    } | awk -F'\t' '!seen[$1]++'
+}
+
+# iptables-restore input for the VPSM-IN chain: fw_rules <4|6>
+fw_rules() {
+    local v=$1 spec
+    echo "*filter"
+    echo ":$FW_CHAIN - [0:0]"
+    # Only loopback destinations: proxied connections to this host's public IP also arrive via lo
+    # and must still go through the port whitelist
+    if [[ $v == 4 ]]; then
+        echo "-A $FW_CHAIN -i lo -d 127.0.0.0/8 -j ACCEPT"
+    else
+        echo "-A $FW_CHAIN -i lo -d ::1/128 -j ACCEPT"
+    fi
+    # Ping is dropped rather than rejected so the host does not answer at all. Other ICMP goes before
+    # the INVALID check: PMTU discovery and IPv6 neighbor discovery must never be dropped
+    if [[ $v == 4 ]]; then
+        echo "-A $FW_CHAIN -p icmp --icmp-type echo-request -j DROP"
+        echo "-A $FW_CHAIN -p icmp -j ACCEPT"
+    else
+        echo "-A $FW_CHAIN -p ipv6-icmp --icmpv6-type echo-request -j DROP"
+        echo "-A $FW_CHAIN -p ipv6-icmp -j ACCEPT"
+    fi
+    echo "-A $FW_CHAIN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+    # Dropped rather than rejected: a TCP reset here could kill legitimate established connections
+    echo "-A $FW_CHAIN -m conntrack --ctstate INVALID -j DROP"
+    [[ $v == 6 ]] && echo "-A $FW_CHAIN -s fe80::/10 -p udp --sport 547 --dport 546 -j ACCEPT"
+    while read -r spec; do
+        echo "-A $FW_CHAIN -p ${spec#*/} --dport $(tr - : <<<"${spec%/*}") -j ACCEPT"
+    done < <(fw_allowed | cut -f1)
+    echo "-A $FW_CHAIN -p tcp -j REJECT --reject-with tcp-reset"
+    if [[ $v == 4 ]]; then
+        echo "-A $FW_CHAIN -p udp -j REJECT --reject-with icmp-port-unreachable"
+        echo "-A $FW_CHAIN -j REJECT --reject-with icmp-proto-unreachable"
+    else
+        echo "-A $FW_CHAIN -p udp -j REJECT --reject-with icmp6-port-unreachable"
+        echo "-A $FW_CHAIN -j REJECT --reject-with icmp6-adm-prohibited"
+    fi
+    echo "COMMIT"
+}
+
+# fw_load <iptables|ip6tables>: atomically replace VPSM-IN (--noflush only flushes the declared chain)
+fw_load() {
+    local ipt=$1 v=4
+    [[ $ipt == ip6tables ]] && v=6
+    fw_rules "$v" | "$ipt-restore" --noflush || return 1
+    "$ipt" -w -C INPUT -j "$FW_CHAIN" 2>/dev/null || "$ipt" -w -I INPUT 1 -j "$FW_CHAIN"
+}
+
+fw_unload() {
+    local ipt=$1
+    cmd_exists "$ipt" || return 0
+    while "$ipt" -w -D INPUT -j "$FW_CHAIN" 2>/dev/null; do :; done
+    "$ipt" -w -F "$FW_CHAIN" 2>/dev/null
+    "$ipt" -w -X "$FW_CHAIN" 2>/dev/null
+    return 0
+}
+
+fw_loaded() { cmd_exists "$1" && "$1" -w -C INPUT -j "$FW_CHAIN" 2>/dev/null; }
+
+fw_apply() {
+    if [[ -n ${VPSM_NO_SERVICE:-} ]]; then
+        msg "(dry run, skipped) iptables-restore --noflush:"
+        fw_rules 4
+        fw_has_v6 && { msg "(dry run, skipped) ip6tables-restore --noflush:"; fw_rules 6; }
+        return 0
+    fi
+    fw_load iptables || err "Failed to load IPv4 firewall rules"
+    if fw_has_v6; then
+        if ! cmd_exists ip6tables; then
+            warn "ip6tables not found, IPv6 inbound traffic is NOT filtered"
+        elif ! fw_load ip6tables; then
+            warn "Failed to load IPv6 firewall rules, IPv6 inbound traffic is NOT filtered"
+        fi
+    fi
+}
+
+fw_flush_all() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && { msg "(dry run, skipped) remove $FW_CHAIN rules"; return 0; }
+    fw_unload iptables
+    fw_unload ip6tables
+}
+
+# Re-apply the rules if the firewall is enabled (call after changing ports)
+fw_refresh() { fw_enabled && fw_apply; return 0; }
+
+fw_list() {
+    local spec desc
+    while IFS=$'\t' read -r spec desc; do
+        printf '  %-16s %s\n' "$spec" "$desc"
+    done < <(fw_allowed)
+}
+
+fw_state_text() {
+    if ! fw_enabled; then
+        echo "disabled"
+    elif fw_loaded iptables; then
+        echo "enabled"
+    else
+        echo "enabled, but rules are NOT loaded (run vpsm firewall reload)"
+    fi
+}
+
+fw_status() {
+    echo "Firewall: $(fw_state_text)"
+    echo "Allowed inbound ports (everything else is rejected and ping is blocked when enabled):"
+    fw_list
+}
+
+# vpsm firewall on [-y]
+fw_enable() {
+    local p conf ans s
+    fw_ensure_tools
+    # Live ports are not detectable at boot (sshd is not running yet), so persist them
+    conf=$(fw_sshd_ports)
+    for p in $(fw_ssh_live_ports); do
+        grep -qx "$p" <<<"$conf" && continue
+        db_write --arg s "$p/tcp" '.settings.firewall.allow = ((.settings.firewall.allow // []) + [$s] | unique)'
+        msg "SSH is listening on port $p, which is not in sshd_config; added it to the allow list"
+    done
+    msg "Only these inbound ports will be allowed, everything else will be rejected and ping blocked:"
+    fw_list
+    if [[ ${1:-} != -y && ${1:-} != --yes && -t 0 ]]; then
+        read -r -p "Make sure your SSH port is listed above. Enable the firewall? [y/N] " ans
+        [[ $ans == y || $ans == Y ]] || { msg "Cancelled"; return 0; }
+    fi
+    if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
+        for s in ufw firewalld; do
+            systemctl is-active --quiet "$s" && warn "$s is running; its rules also apply and may block ports allowed here"
+        done
+    fi
+    fw_apply
+    db_write '.settings.firewall.enabled = true'
+    svc enable "$FW_SVC" >/dev/null 2>&1 || warn "Failed to enable $FW_SVC, rules will not be restored after reboot"
+    ok "Firewall enabled (rules are restored automatically on boot)"
+    msg "Also allow these ports in your VPS provider's security group, if it has one"
+}
+
+fw_disable() {
+    db_write '.settings.firewall.enabled = false'
+    svc disable --now "$FW_SVC" >/dev/null 2>&1
+    fw_flush_all
+    ok "Firewall disabled, all vpsm iptables rules removed"
+}
+
+fw_allow() {
+    local spec
+    spec=$(fw_parse_spec "${1:-}") || err "Usage: vpsm firewall allow <port|from-to>[/tcp|/udp], e.g. 8080, 53/udp, 10000-20000/udp"
+    fw_allowed | cut -f1 | grep -qx "$spec" && { msg "$spec is already allowed"; return 0; }
+    db_write --arg s "$spec" '.settings.firewall.allow = ((.settings.firewall.allow // []) + [$s] | unique)'
+    fw_refresh
+    ok "Allowed inbound $spec$(fw_enabled || echo ' (takes effect once the firewall is enabled)')"
+}
+
+fw_deny() {
+    local spec
+    spec=$(fw_parse_spec "${1:-}") || err "Usage: vpsm firewall deny <port|from-to>[/tcp|/udp]"
+    if [[ $(db_get --arg s "$spec" '(.settings.firewall.allow // []) | any(.[]; . == $s)') != true ]]; then
+        fw_allowed | cut -f1 | grep -qx "$spec" &&
+            err "$spec is required by SSH/Caddy/Xray and cannot be removed"
+        err "$spec is not in the custom allow list"
+    fi
+    db_write --arg s "$spec" '.settings.firewall.allow -= [$s]'
+    fw_refresh
+    ok "Removed $spec from the allow list"
+}
+
+# Boot entry point (vpsm-firewall.service), also used to re-apply manually
+fw_reload() {
+    if fw_enabled; then
+        fw_ensure_tools
+        fw_apply
+        ok "Firewall rules loaded"
+    else
+        fw_flush_all
+    fi
+}
+
+firewall_cmd() {
+    local sub=${1:-status}
+    [[ $# -gt 0 ]] && shift
+    case $sub in
+        status | s) fw_status ;;
+        on | enable) fw_enable "$@" ;;
+        off | disable) fw_disable ;;
+        allow | add) fw_allow "$@" ;;
+        deny | del | rm) fw_deny "$@" ;;
+        reload | apply) fw_reload ;;
+        flush) fw_flush_all ;;
+        *) err "Usage: vpsm firewall [status|on|off|allow <port>[/proto]|deny <port>[/proto]|reload]" ;;
+    esac
+}
