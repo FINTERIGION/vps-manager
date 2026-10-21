@@ -78,30 +78,39 @@ ask() {
 # ---------- Dependencies ----------
 install_deps() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
-    local need=() c
-    for c in curl jq unzip tar flock timeout; do
+    # Without cmp every sync sees a changed config.json and restarts Xray; without ip the
+    # self-address block in the Xray routing is silently empty
+    local required=(curl jq unzip tar flock timeout cmp diff ip ss) need=() c pm iproute=iproute2
+    for c in "${required[@]}" qrencode iptables; do
         command -v "$c" >/dev/null 2>&1 || need+=("$c")
     done
-    command -v qrencode >/dev/null 2>&1 || need+=(qrencode)
-    command -v iptables >/dev/null 2>&1 || need+=(iptables)
     [[ ${#need[@]} -eq 0 ]] && return 0
-    # flock/timeout come from util-linux / coreutils
+    if command -v apt-get >/dev/null 2>&1; then
+        pm=apt-get
+    elif command -v dnf >/dev/null 2>&1; then
+        pm=dnf iproute=iproute
+    elif command -v yum >/dev/null 2>&1; then
+        pm=yum iproute=iproute
+    fi
     local pkgs=() p
     for p in "${need[@]}"; do
-        case $p in flock) pkgs+=(util-linux) ;; timeout) pkgs+=(coreutils) ;; *) pkgs+=("$p") ;; esac
+        case $p in
+            flock) p=util-linux ;;
+            timeout) p=coreutils ;;
+            cmp | diff) p=diffutils ;;
+            ip | ss) p=$iproute ;;
+        esac
+        [[ " ${pkgs[*]} " == *" $p "* ]] || pkgs+=("$p")
     done
+    [[ -n $pm ]] || die "Unsupported package manager, please install manually: ${pkgs[*]}"
     echo "Installing dependencies: ${pkgs[*]}"
-    if command -v apt-get >/dev/null 2>&1; then
+    if [[ $pm == apt-get ]]; then
         apt-get update -y >/dev/null 2>&1
         DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}" || true
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y "${pkgs[@]}" || true
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y "${pkgs[@]}" || true
     else
-        die "Unsupported package manager, please install manually: ${pkgs[*]}"
+        "$pm" install -y "${pkgs[@]}" || true
     fi
-    for c in curl jq unzip tar flock timeout; do
+    for c in "${required[@]}"; do
         command -v "$c" >/dev/null 2>&1 || die "Missing dependency: $c"
     done
 }

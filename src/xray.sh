@@ -37,8 +37,13 @@ xray_gen_config() {
                  serverNames: [$s.domain], privateKey: $s.private_key, shortIds: $s.short_ids}},
              sniffing: {enabled: true, destOverride: ["http", "tls"], routeOnly: true}}
           ],
+          # Outbound traffic prefers IPv4: domains connect over IPv4 whenever they have an A record and
+          # fall back to IPv6 only when they do not. DNS keeps both families so IPIfNonMatch routing
+          # also checks AAAA records against the block rules
+          dns: {servers: ["localhost"], queryStrategy: "UseIP"},
           outbounds: [
-            {tag: "direct", protocol: "freedom"},
+            {tag: "direct", protocol: "freedom",
+             streamSettings: {sockopt: {domainStrategy: "ForceIPv4v6"}}},
             {tag: "block", protocol: "blackhole"}
           ],
           routing: {domainStrategy: "IPIfNonMatch", rules: [

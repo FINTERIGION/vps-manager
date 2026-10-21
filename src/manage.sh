@@ -100,11 +100,23 @@ show_log() {
     esac
 }
 
+# update_target_tag <owner/repo> <installed version file> [tag]: prints the tag to install, or nothing when
+# no tag was given and the latest release is already installed (a restart would drop every connection)
+update_target_tag() {
+    local tag=${3:-}
+    [[ -n $tag ]] && { echo "$tag"; return 0; }
+    tag=$(github_latest "$1")
+    [[ -n $tag ]] || err "Failed to get the latest version of $1"
+    [[ $tag == "$(cat "$2" 2>/dev/null)" ]] || echo "$tag"
+}
+
 # install_xray/install_caddy keep the previous version as *.old: roll back to it if the new one does not stay up
 update_core() {
-    local files=(xray geoip.dat xray.version) new
+    local files=(xray geoip.dat xray.version) tag new
+    tag=$(update_target_tag XTLS/Xray-core "$BIN_DIR/xray.version" "${1:-}") || return 1
+    [[ -n $tag ]] || { ok "Xray is already the latest version ($(cat "$BIN_DIR/xray.version"))"; return 0; }
     xray_active && traffic_pull
-    install_xray "${1:-}"
+    install_xray "$tag"
     new=$(cat "$BIN_DIR/xray.version")
     if (xray_gen_config) && svc restart "$XRAY_SVC" && svc_settled "$XRAY_SVC"; then
         bin_drop_backup "${files[@]}"
@@ -119,8 +131,10 @@ update_core() {
 }
 
 update_caddy() {
-    local files=(caddy caddy.version) new
-    install_caddy "${1:-}"
+    local files=(caddy caddy.version) tag new
+    tag=$(update_target_tag caddyserver/caddy "$BIN_DIR/caddy.version" "${1:-}") || return 1
+    [[ -n $tag ]] || { ok "Caddy is already the latest version ($(cat "$BIN_DIR/caddy.version"))"; return 0; }
+    install_caddy "$tag"
     new=$(cat "$BIN_DIR/caddy.version")
     if svc restart "$CADDY_SVC" && svc_settled "$CADDY_SVC"; then
         bin_drop_backup "${files[@]}"
@@ -260,7 +274,8 @@ Operations:
    status                        Service status
    start|stop|restart [xray|caddy|all]
    log [xray|caddy|sync]         View logs
-   update [core|caddy|sh|all]    Update Xray / Caddy / these scripts
+   update [core|caddy|sh|all]    Update Xray / Caddy / these scripts (skipped when already the latest)
+   update core|caddy <version>   Install a specific Xray / Caddy version (e.g. v26.3.27)
    bbr                           Enable BBR
    uninstall                     Uninstall
    v, version                    Show version

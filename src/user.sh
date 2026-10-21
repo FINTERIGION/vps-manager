@@ -321,7 +321,7 @@ edit_rules() {
     if [[ ! -f $CUSTOM_RULES ]]; then
         cat >"$CUSTOM_RULES" <<'EOF'
 # Custom Clash rules, one per line, inserted before all built-in rules (highest priority)
-# Available policy groups: Proxy / Apple / Microsoft / Steam / AdBlock / Final / DIRECT / REJECT
+# Available policy groups: Proxy / Steam / AdBlock / Final / DIRECT / REJECT
 # Examples:
 # DOMAIN-SUFFIX,example.com,Proxy
 # DOMAIN-KEYWORD,tracker,AdBlock

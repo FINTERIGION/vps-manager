@@ -7,7 +7,8 @@ traffic_pull() {
     local out
     out=$(timeout 15 "$XRAY_BIN" api statsquery -s "$API_ADDR" -pattern "user>>>" -reset 2>/dev/null) || return 1
     [[ -n $out ]] || return 0
-    if ! db_write --argjson raw "$out" '
+    # Subshell: db_write exits on failure, which would skip the recovery below
+    if ! (db_write --argjson raw "$out" '
         (reduce (($raw.stat // [])[]) as $s ({};
             ($s.name | split(">>>")) as $p
             | if ($p | length) == 4 and $p[0] == "user" and $p[2] == "traffic"
@@ -15,7 +16,7 @@ traffic_pull() {
         | .users |= map(
             ($t[.name] // {}) as $d
             | .up += ($d.uplink // 0)
-            | .down += ($d.downlink // 0))' 2>/dev/null; then
+            | .down += ($d.downlink // 0))') 2>/dev/null; then
         # Counters were already zeroed by -reset; keep the raw data for manual recovery
         (umask 077; echo "$out" >"$ROOT/stats.lost.$(date +%s).json")
         warn "Failed to parse traffic stats, raw data saved to $ROOT/stats.lost.*.json"

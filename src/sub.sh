@@ -1,9 +1,34 @@
 #!/usr/bin/env bash
 # vpsm - subscription generation: one Clash (Mihomo) YAML + one Caddy route snippet per user
 
-# Render one user's Clash YAML to stdout
+# Clash rules sending the server itself direct, one per line. The domain's records cover NAT hosts
+# whose public IP is not on any interface; private addresses are already direct via lancidr
+sub_server_rules() {
+    local domain
+    domain=$(db_get '.settings.domain')
+    echo "DOMAIN-SUFFIX,$domain,DIRECT"
+    {
+        self_ips | jq -r '.[]'
+        timeout 5 getent ahosts "$domain" 2>/dev/null | awk '{print $1}'
+    } | awk '
+        /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+            split($0, o, ".")
+            if (o[1] == 0 || o[1] == 10 || o[1] == 127 || (o[1] == 169 && o[2] == 254) ||
+                (o[1] == 172 && o[2] >= 16 && o[2] <= 31) || (o[1] == 192 && o[2] == 168) ||
+                (o[1] == 100 && o[2] >= 64 && o[2] <= 127)) next
+            print "IP-CIDR," $0 "/32,DIRECT,no-resolve"
+            next
+        }
+        /:/ {
+            a = tolower($0)
+            if (a == "::1" || a ~ /^::ffff:/ || a ~ /^fe[89ab]/ || a ~ /^f[cd]/) next
+            print "IP-CIDR6," a "/128,DIRECT,no-resolve"
+        }' | sort -u
+}
+
+# Render one user's Clash YAML to stdout: sub_render_clash <name> <uuid> <server rules file>
 sub_render_clash() {
-    local name=$1 uuid=$2 domain port pbk sid node
+    local name=$1 uuid=$2 sf=$3 domain port pbk sid node
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
     pbk=$(db_get '.settings.public_key')
@@ -11,7 +36,7 @@ sub_render_clash() {
     node=$(node_name)
     # Literal replacement: the node name may contain "&", which gsub would treat as the matched text
     awk -v node="$node" -v server="$domain" -v port="$port" -v uuid="$uuid" \
-        -v pbk="$pbk" -v sid="$sid" -v sni="$domain" -v user="$name" -v cf="$CUSTOM_RULES" '
+        -v pbk="$pbk" -v sid="$sid" -v sni="$domain" -v user="$name" -v cf="$CUSTOM_RULES" -v sf="$sf" '
         function rep(s, k, v,   i, out) {
             out = ""
             while ((i = index(s, k)) > 0) {
@@ -20,16 +45,17 @@ sub_render_clash() {
             }
             return out s
         }
-        /^[[:space:]]*#[[:space:]]*__CUSTOM_RULES__/ {
-            while ((getline line < cf) > 0) {
+        function rules(f,   line) {
+            while ((getline line < f) > 0) {
                 gsub(/^[ \t]+|[ \t]+$/, "", line)
                 if (line == "" || line ~ /^#/) continue
                 sub(/^-[ \t]*/, "", line)
                 print "  - " line
             }
-            close(cf)
-            next
+            close(f)
         }
+        /^[[:space:]]*#[[:space:]]*__CUSTOM_RULES__/ { rules(cf); next }
+        /^[[:space:]]*#[[:space:]]*__SERVER_RULES__/ { rules(sf); next }
         {
             $0 = rep($0, "__NODE__", node); $0 = rep($0, "__SERVER__", server); $0 = rep($0, "__PORT__", port)
             $0 = rep($0, "__UUID__", uuid); $0 = rep($0, "__PBK__", pbk); $0 = rep($0, "__SID__", sid)
@@ -72,10 +98,11 @@ sub_regen() {
     stage=$(mktemp -d "$ROOT/.stage.XXXXXX") || return 1
     mkdir -p "$stage/sub" "$stage/users"
     fname=$(urlencode "$(node_name)")
+    sub_server_rules >"$stage/server-rules"
 
     while IFS=$'\t' read -r name uuid token quota up down expire; do
         [[ -n $name ]] || continue
-        sub_render_clash "$name" "$uuid" >"$stage/sub/$token.yaml"
+        sub_render_clash "$name" "$uuid" "$stage/server-rules" >"$stage/sub/$token.yaml"
         sub_render_caddy "$fname" "$token" "$quota" "$up" "$down" "$expire" >"$stage/users/$name.conf"
     done < <(jq -r '.users[] | [.name, .uuid, .token, .quota, .up, .down, (.expire // "")] | @tsv' "$DB")
 
