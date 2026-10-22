@@ -96,6 +96,7 @@ apply_state() {
 sync_all() {
     local snap
     fw_guard_ensure
+    fw_ports_ensure
     snap=$(state_snapshot)
     apply_state "$snap"
 }

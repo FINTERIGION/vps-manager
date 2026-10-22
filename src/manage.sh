@@ -261,7 +261,7 @@ Global settings:
    rules                         Edit custom Clash routing rules
    regen                         Regenerate Xray/Caddy configs and all subscriptions
 
-Firewall (iptables, allows only SSH / 80 / Xray port + custom ports, rejects all other inbound, blocks ping):
+Firewall (iptables, allows only SSH / 80 / Xray port + custom ports, rejects all other inbound):
    firewall [status]             Show firewall state and allowed ports
    firewall on|off               Enable/disable the firewall (restored automatically on boot)
    firewall allow <port>[/proto] Allow an extra inbound port, e.g. 8080, 53/udp, 10000-20000/udp

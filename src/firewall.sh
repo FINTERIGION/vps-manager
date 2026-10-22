@@ -8,6 +8,7 @@
 FW_CHAIN="VPSM-IN"
 FW_OUT_CHAIN="VPSM-OUT"
 FW_SVC="vpsm-firewall"
+FW_STAMP="$ROOT/.fw_ports" # allowed ports of the loaded VPSM-IN rules
 
 fw_enabled() { [[ $(db_get '.settings.firewall.enabled // false') == true ]]; }
 fw_has_v6() { [[ -e /proc/net/if_inet6 ]]; }
@@ -104,13 +105,11 @@ fw_rules() {
     else
         echo "-A $FW_CHAIN -i lo -d ::1/128 -j ACCEPT"
     fi
-    # Ping is dropped rather than rejected so the host does not answer at all. Other ICMP goes before
-    # the INVALID check: PMTU discovery and IPv6 neighbor discovery must never be dropped
+    # ICMP (ping included) goes before the INVALID check: PMTU discovery and IPv6 neighbor discovery
+    # must never be dropped
     if [[ $v == 4 ]]; then
-        echo "-A $FW_CHAIN -p icmp --icmp-type echo-request -j DROP"
         echo "-A $FW_CHAIN -p icmp -j ACCEPT"
     else
-        echo "-A $FW_CHAIN -p ipv6-icmp --icmpv6-type echo-request -j DROP"
         echo "-A $FW_CHAIN -p ipv6-icmp -j ACCEPT"
     fi
     echo "-A $FW_CHAIN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
@@ -170,6 +169,7 @@ fw_apply() {
         return 0
     fi
     fw_rules 4 | fw_load iptables "$FW_CHAIN" INPUT || err "Failed to load IPv4 firewall rules"
+    fw_allowed | cut -f1 >"$FW_STAMP"
     if fw_has_v6; then
         if ! cmd_exists ip6tables; then
             warn "ip6tables not found, IPv6 inbound traffic is NOT filtered"
@@ -193,6 +193,19 @@ fw_guard_ensure() {
     fw_loaded iptables "$FW_OUT_CHAIN" OUTPUT || fw_guard_apply >/dev/null 2>&1
     systemctl is-enabled --quiet "$FW_SVC" 2>/dev/null || systemctl enable --quiet "$FW_SVC" 2>/dev/null
     return 0
+}
+
+# Called by the traffic timer: after the SSH port is changed and sshd restarted, new connections are
+# allowed within a minute instead of only after a manual reload. Rules that are not loaded stay so
+fw_ports_ensure() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    fw_enabled && fw_loaded iptables || return 0
+    local cur
+    cur=$(fw_allowed | cut -f1)
+    [[ $cur == "$(cat "$FW_STAMP" 2>/dev/null)" ]] && return 0
+    msg "Allowed inbound ports changed (${cur//$'\n'/ }), reloading firewall rules"
+    # Subshell: fw_apply exits on failure, which would skip the traffic sync
+    (fw_apply) || warn "Failed to reload firewall rules, run: vpsm firewall reload"
 }
 
 fw_guard_text() {
@@ -241,7 +254,7 @@ fw_state_text() {
 fw_status() {
     echo "Firewall: $(fw_state_text)"
     echo "Xray API guard (always on): $(fw_guard_text)"
-    echo "Allowed inbound ports (everything else is rejected and ping is blocked when enabled):"
+    echo "Allowed inbound ports (everything else is rejected when enabled, ping stays allowed):"
     fw_list
 }
 
@@ -256,7 +269,7 @@ fw_enable() {
         db_write --arg s "$p/tcp" '.settings.firewall.allow = ((.settings.firewall.allow // []) + [$s] | unique)'
         msg "SSH is listening on port $p, which is not in sshd_config; added it to the allow list"
     done
-    msg "Only these inbound ports will be allowed, everything else will be rejected and ping blocked:"
+    msg "Only these inbound ports will be allowed, everything else will be rejected (ping stays allowed):"
     fw_list
     if [[ ${1:-} != -y && ${1:-} != --yes && -t 0 ]]; then
         read -r -p "Make sure your SSH port is listed above. Enable the firewall? [y/N] " ans

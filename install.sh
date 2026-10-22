@@ -169,7 +169,7 @@ parse_expire "$EXPIRE" >/dev/null || die "Invalid expiry format: $EXPIRE"
 ask RESET_DAY "Monthly traffic reset day (1-28, shared by all users)" 1
 [[ $RESET_DAY =~ ^[0-9]+$ ]] && ((10#$RESET_DAY >= 1 && 10#$RESET_DAY <= 28)) || die "Reset day must be between 1 and 28"
 RESET_DAY=$((10#$RESET_DAY))
-ask FIREWALL "Enable iptables firewall (allow only SSH, 80 and $PORT inbound, reject the rest, block ping)? (y/n)" n
+ask FIREWALL "Enable iptables firewall (allow only SSH, 80 and $PORT inbound, reject the rest)? (y/n)" n
 [[ ${FIREWALL,,} =~ ^(y|yes|1|true)$ ]] && FIREWALL=1 || FIREWALL=""
 
 # ---------- Environment checks (warnings only) ----------

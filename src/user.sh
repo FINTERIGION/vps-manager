@@ -228,7 +228,10 @@ set_port() {
     fw_refresh
     xray_gen_config
     xray_active && xray_restart
+    # The http:// redirect points at the port
+    caddy_gen
     sub_regen force
+    caddy_reload
     if fw_enabled; then
         ok "Listen port changed to $1 (vpsm firewall updated; subscriptions/client nodes have been updated)"
     else
@@ -313,6 +316,7 @@ regen_all() {
     caddy_gen
     sub_regen force
     caddy_reload
+    fw_refresh
     ok "Configs regenerated"
 }
 

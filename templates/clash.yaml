@@ -72,7 +72,7 @@ proxy-groups:
       - DIRECT
 
 # Rule sets from Loyalsoldier/clash-rules (whitelist mode) and MetaCubeX/meta-rules-dat (geosite),
-# updated automatically by the client
+# updated automatically by the client through the proxy (jsDelivr is unreliable from China)
 rule-providers:
   reject:
     type: http
@@ -80,72 +80,77 @@ rule-providers:
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/reject.txt"
     path: ./ruleset/reject.yaml
     interval: 86400
+    proxy: Proxy
   github:
     type: http
     behavior: domain
     url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/github.yaml"
     path: ./ruleset/github.yaml
     interval: 86400
+    proxy: Proxy
   steam-cn:
     type: http
     behavior: domain
     url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam@cn.yaml"
     path: ./ruleset/steam-cn.yaml
     interval: 86400
+    proxy: Proxy
   steam:
     type: http
     behavior: domain
     url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam.yaml"
     path: ./ruleset/steam.yaml
     interval: 86400
+    proxy: Proxy
   proxy:
     type: http
     behavior: domain
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/proxy.txt"
     path: ./ruleset/proxy.yaml
     interval: 86400
+    proxy: Proxy
   direct:
     type: http
     behavior: domain
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/direct.txt"
     path: ./ruleset/direct.yaml
     interval: 86400
+    proxy: Proxy
   private:
     type: http
     behavior: domain
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/private.txt"
     path: ./ruleset/private.yaml
     interval: 86400
+    proxy: Proxy
   gfw:
     type: http
     behavior: domain
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt"
     path: ./ruleset/gfw.yaml
     interval: 86400
-  tld-not-cn:
-    type: http
-    behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/tld-not-cn.txt"
-    path: ./ruleset/tld-not-cn.yaml
-    interval: 86400
+    proxy: Proxy
   cncidr:
     type: http
     behavior: ipcidr
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/cncidr.txt"
     path: ./ruleset/cncidr.yaml
     interval: 86400
+    proxy: Proxy
   lancidr:
     type: http
     behavior: ipcidr
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/lancidr.txt"
     path: ./ruleset/lancidr.yaml
     interval: 86400
+    proxy: Proxy
   applications:
     type: http
     behavior: classical
     url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/applications.txt"
     path: ./ruleset/applications.yaml
     interval: 86400
+    proxy: Proxy
 
 rules:
   # __CUSTOM_RULES__
@@ -157,10 +162,13 @@ rules:
   - RULE-SET,github,Proxy
   - RULE-SET,steam-cn,DIRECT
   - RULE-SET,steam,Steam
+  # direct goes before proxy/gfw: its entries under foreign suffixes (Google CN, Apple/Microsoft China CDNs)
+  # are deliberate exceptions, and proxying them fails whenever they resolve to Chinese IPs
+  - RULE-SET,direct,DIRECT
+  # QUIC tunneled over TCP performs poorly; browsers fall back to TCP right away
+  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   - RULE-SET,proxy,Proxy
   - RULE-SET,gfw,Proxy
-  - RULE-SET,tld-not-cn,Proxy
-  - RULE-SET,direct,DIRECT
   - RULE-SET,lancidr,DIRECT,no-resolve
   # The CN IP rules resolve unmatched domains: domestic sites missing from the direct list would
   # otherwise go through the proxy, and the server blocks Chinese IPs
