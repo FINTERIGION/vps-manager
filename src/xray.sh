@@ -34,7 +34,9 @@ xray_gen_config() {
                network: "tcp", security: "reality",
                realitySettings: {
                  show: false, dest: $dest, xver: 0,
-                 serverNames: [$s.domain], privateKey: $s.private_key, shortIds: $s.short_ids}},
+                 serverNames: [$s.domain], privateKey: $s.private_key, shortIds: $s.short_ids,
+                 # Xray >= 26.7.11 defaults this to 26.3.27, which rejects Mihomo (hardcoded 1.8.2)
+                 minClientVer: "1.8.2"}},
              sniffing: {enabled: true, destOverride: ["http", "tls"], routeOnly: true}}
           ],
           # Outbound traffic prefers IPv4: domains connect over IPv4 whenever they have an A record and
