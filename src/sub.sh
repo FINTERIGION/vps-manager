@@ -28,15 +28,17 @@ sub_server_rules() {
 
 # Render one user's Clash YAML to stdout: sub_render_clash <name> <uuid> <server rules file>
 sub_render_clash() {
-    local name=$1 uuid=$2 sf=$3 domain port pbk sid node
+    local name=$1 uuid=$2 sf=$3 domain port pbk sid node reset_date
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
     pbk=$(db_get '.settings.public_key')
     sid=$(db_get '.settings.short_ids[0]')
     node=$(node_name)
+    reset_date=$(next_reset_date)
     # Literal replacement: the node name may contain "&", which gsub would treat as the matched text
     awk -v node="$node" -v server="$domain" -v port="$port" -v uuid="$uuid" \
-        -v pbk="$pbk" -v sid="$sid" -v sni="$domain" -v user="$name" -v cf="$CUSTOM_RULES" -v sf="$sf" '
+        -v pbk="$pbk" -v sid="$sid" -v sni="$domain" -v user="$name" \
+        -v reset_date="$reset_date" -v cf="$CUSTOM_RULES" -v sf="$sf" '
         function rep(s, k, v,   i, out) {
             out = ""
             while ((i = index(s, k)) > 0) {
@@ -60,6 +62,7 @@ sub_render_clash() {
             $0 = rep($0, "__NODE__", node); $0 = rep($0, "__SERVER__", server); $0 = rep($0, "__PORT__", port)
             $0 = rep($0, "__UUID__", uuid); $0 = rep($0, "__PBK__", pbk); $0 = rep($0, "__SID__", sid)
             $0 = rep($0, "__SNI__", sni); $0 = rep($0, "__USER__", user)
+            $0 = rep($0, "__RESET_DATE__", reset_date)
             print
         }' "$SH_DIR/templates/clash.yaml"
 }

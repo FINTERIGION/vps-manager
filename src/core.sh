@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.3.1"
+VPSM_VERSION="1.4.0"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Without VPSM_ROOT (e.g. the /usr/local/bin/vpsm symlink), use the installation these scripts live in

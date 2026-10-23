@@ -33,6 +33,11 @@ dns:
     - https://doh.pub/dns-query
 
 proxies:
+  # Shown first in clients: next monthly traffic reset (not a usable server)
+  - name: "下次重置：__RESET_DATE__"
+    type: socks5
+    server: 127.0.0.1
+    port: 1
   - name: "__NODE__"
     type: vless
     server: __SERVER__
@@ -47,11 +52,14 @@ proxies:
     reality-opts:
       public-key: __PBK__
       short-id: __SID__
+      # Xray >= 26.9.8 rejects ClientHellos that omit X25519MLKEM768 (handshake falls back to dest)
+      support-x25519mlkem768: true
 
 proxy-groups:
   - name: Proxy
     type: select
     proxies:
+      - "下次重置：__RESET_DATE__"
       - "__NODE__"
       - DIRECT
   - name: Steam

@@ -213,6 +213,7 @@ set_reset_day() {
     [[ $d =~ ^[0-9]+$ ]] && ((10#$d >= 1 && 10#$d <= 28)) || err "Usage: vpsm reset-day <1-28>"
     d=$((10#$d))
     db_write --argjson rd "$d" --arg lr "$(calc_last_reset "$d")" '.settings.reset_day = $rd | .settings.last_reset = $lr'
+    sub_regen force
     ok "All users' traffic will reset on day $d of each month, next reset: $(next_reset_date)"
 }
 
