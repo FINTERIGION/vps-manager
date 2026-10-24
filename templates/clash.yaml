@@ -7,37 +7,80 @@ log-level: info
 ipv6: false
 unified-delay: true
 tcp-concurrent: true
+geo-auto-update: true
+geo-update-interval: 24
+geox-url:
+  geosite: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+  mmdb: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb"
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+hosts:
+  dns.alidns.com:
+    - 223.5.5.5
+    - 223.6.6.6
+  doh.pub:
+    - 1.12.12.12
+    - 120.53.53.53
+  dns.cloudflare.com:
+    - 1.1.1.1
+    - 1.0.0.1
+  dns.google:
+    - 8.8.8.8
+    - 8.8.4.4
 
 dns:
   enable: true
   ipv6: false
+  use-hosts: true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter:
     - "*.lan"
-    - "+.local"
+    - "*.local"
+    - "*.localhost"
+    - "+.stun.*.*"
+    - "+.stun.*.*.*"
+    - "+.stun.*.*.*.*"
     - "localhost.ptlogin2.qq.com"
     - "+.msftconnecttest.com"
     - "+.msftncsi.com"
     - "+.srv.nintendo.net"
     - "+.stun.playstation.net"
     - "+.xboxlive.com"
+    - geosite:private
   default-nameserver:
     - 223.5.5.5
     - 119.29.29.29
-  nameserver:
-    - https://dns.alidns.com/dns-query
-    - https://doh.pub/dns-query
+  # Resolve the node itself without going through it
   proxy-server-nameserver:
-    - https://dns.alidns.com/dns-query
-    - https://doh.pub/dns-query
+    - https://dns.alidns.com/dns-query#DIRECT
+    - https://doh.pub/dns-query#DIRECT
+  # Foreign DNS through the node itself, not a group that may be set to DIRECT
+  nameserver:
+    - "https://dns.cloudflare.com/dns-query#__NODE__"
+    - "https://dns.google/dns-query#__NODE__"
+  direct-nameserver:
+    - https://dns.alidns.com/dns-query#DIRECT
+    - https://doh.pub/dns-query#DIRECT
+  nameserver-policy:
+    "geosite:cn,private":
+      - https://dns.alidns.com/dns-query#DIRECT
+      - https://doh.pub/dns-query#DIRECT
+
+sniffer:
+  enable: true
+  force-dns-mapping: true
+  override-destination: true
+  parse-pure-ip: true
+  sniff:
+    TLS:
+      ports: [443, 8443]
+    HTTP:
+      ports: [80, 8080-8880]
 
 proxies:
-  # Shown first in clients: next monthly traffic reset (not a usable server)
-  - name: "下次重置：__RESET_DATE__"
-    type: socks5
-    server: 127.0.0.1
-    port: 1
   - name: "__NODE__"
     type: vless
     server: __SERVER__
@@ -59,128 +102,235 @@ proxy-groups:
   - name: Proxy
     type: select
     proxies:
-      - "下次重置：__RESET_DATE__"
+      - "__NODE__"
+      - DIRECT
+  - name: AI
+    type: select
+    proxies:
+      - Proxy
+      - "__NODE__"
+      - DIRECT
+  - name: Google
+    type: select
+    proxies:
+      - Proxy
+      - "__NODE__"
+      - DIRECT
+  - name: Telegram
+    type: select
+    proxies:
+      - Proxy
       - "__NODE__"
       - DIRECT
   - name: Steam
     type: select
     proxies:
-      - DIRECT
       - Proxy
-  - name: AdBlock
-    type: select
-    proxies:
-      - REJECT
       - DIRECT
-      - Proxy
+      - "__NODE__"
   - name: Final
     type: select
     proxies:
       - Proxy
       - DIRECT
 
-# Rule sets from Loyalsoldier/clash-rules (whitelist mode) and MetaCubeX/meta-rules-dat (geosite),
-# updated automatically by the client through the proxy (jsDelivr is unreliable from China)
+# testingcf.jsdelivr.net is reachable from China without a proxy
 rule-providers:
   reject:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/reject.txt"
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/reject.txt"
     path: ./ruleset/reject.yaml
     interval: 86400
-    proxy: Proxy
-  github:
+  ai:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/github.yaml"
-    path: ./ruleset/github.yaml
+    format: text
+    url: "https://testingcf.jsdelivr.net/gh/666OS/rules@release/mihomo/domain/AI.txt"
+    path: ./ruleset/ai.txt
     interval: 86400
-    proxy: Proxy
+  openai:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/openai.yaml"
+    path: ./ruleset/openai.yaml
+    interval: 86400
+  anthropic:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/anthropic.yaml"
+    path: ./ruleset/anthropic.yaml
+    interval: 86400
+  google:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/google.yaml"
+    path: ./ruleset/google.yaml
+    interval: 86400
+  googlefcm:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/googlefcm.yaml"
+    path: ./ruleset/googlefcm.yaml
+    interval: 86400
+  telegram:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/telegram.yaml"
+    path: ./ruleset/telegram.yaml
+    interval: 86400
+  telegramcidr:
+    type: http
+    behavior: ipcidr
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/telegramcidr.txt"
+    path: ./ruleset/telegramcidr.yaml
+    interval: 86400
   steam-cn:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam@cn.yaml"
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam@cn.yaml"
     path: ./ruleset/steam-cn.yaml
     interval: 86400
-    proxy: Proxy
   steam:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam.yaml"
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam.yaml"
     path: ./ruleset/steam.yaml
     interval: 86400
-    proxy: Proxy
   proxy:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/proxy.txt"
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/proxy.txt"
     path: ./ruleset/proxy.yaml
     interval: 86400
-    proxy: Proxy
   direct:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/direct.txt"
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/direct.txt"
     path: ./ruleset/direct.yaml
     interval: 86400
-    proxy: Proxy
   private:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/private.txt"
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/private.txt"
     path: ./ruleset/private.yaml
     interval: 86400
-    proxy: Proxy
   gfw:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt"
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt"
     path: ./ruleset/gfw.yaml
     interval: 86400
-    proxy: Proxy
   cncidr:
     type: http
     behavior: ipcidr
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/cncidr.txt"
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/cncidr.txt"
     path: ./ruleset/cncidr.yaml
     interval: 86400
-    proxy: Proxy
   lancidr:
     type: http
     behavior: ipcidr
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/lancidr.txt"
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/lancidr.txt"
     path: ./ruleset/lancidr.yaml
     interval: 86400
-    proxy: Proxy
   applications:
     type: http
     behavior: classical
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/applications.txt"
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/applications.txt"
     path: ./ruleset/applications.yaml
     interval: 86400
-    proxy: Proxy
 
 rules:
   # __CUSTOM_RULES__
   # The server blocks proxied connections to its own addresses, so services on this VPS go direct
   # __SERVER_RULES__
+  - DST-PORT,853,REJECT
+  - IP-CIDR,8.8.8.8/32,Proxy,no-resolve
+  - IP-CIDR,8.8.4.4/32,Proxy,no-resolve
+  - IP-CIDR,1.1.1.1/32,Proxy,no-resolve
+  - IP-CIDR,1.0.0.1/32,Proxy,no-resolve
+  - IP-CIDR,9.9.9.9/32,Proxy,no-resolve
+  - IP-CIDR,149.112.112.112/32,Proxy,no-resolve
+  - DOMAIN-SUFFIX,dns.google,Proxy
+  - DOMAIN,cloudflare-dns.com,Proxy
   - RULE-SET,applications,DIRECT
   - RULE-SET,private,DIRECT
-  - RULE-SET,reject,AdBlock
-  - RULE-SET,github,Proxy
+  - RULE-SET,lancidr,DIRECT,no-resolve
+  - GEOIP,LAN,DIRECT,no-resolve
+  # Steam China CDNs stay direct; the Steam group is for community / store
   - RULE-SET,steam-cn,DIRECT
+  - DOMAIN-KEYWORD,steamcontent,DIRECT
+  - DOMAIN-KEYWORD,steamcloud,DIRECT
+  - DOMAIN-KEYWORD,steamcdn,DIRECT
+  - DOMAIN-KEYWORD,steamstatic,DIRECT
   - RULE-SET,steam,Steam
-  # direct goes before proxy/gfw: its entries under foreign suffixes (Google CN, Apple/Microsoft China CDNs)
-  # are deliberate exceptions, and proxying them fails whenever they resolve to Chinese IPs
+  - RULE-SET,telegramcidr,Telegram,no-resolve
+  - RULE-SET,telegram,Telegram
+  - DOMAIN-SUFFIX,t.me,Telegram
+  - DOMAIN-SUFFIX,telegram.org,Telegram
+  - DOMAIN-SUFFIX,telegram.me,Telegram
+  - DOMAIN-SUFFIX,telegra.ph,Telegram
+  - DOMAIN-SUFFIX,telesco.pe,Telegram
+  - DOMAIN-SUFFIX,tdesktop.com,Telegram
+  - DOMAIN-KEYWORD,telegram,Telegram
+  # Google / Play before reject and direct: reject lists gvt2.com, direct lists +.cn
+  # and dl.google.com / redirector.gvt1.com, which would otherwise break Play downloads
+  - DOMAIN-SUFFIX,googleapis.cn,Google
+  - DOMAIN-SUFFIX,xn--ngstr-lra8j.com,Google
+  - DOMAIN,dl.google.com,Google
+  - DOMAIN,dl.l.google.com,Google
+  - DOMAIN,c.android.clients.google.com,Google
+  - DOMAIN,update.googleapis.com,Google
+  - DOMAIN,connectivitycheck.gstatic.com,Google
+  - DOMAIN,checkin.gstatic.com,Google
+  - DOMAIN-SUFFIX,gvt1.com,Google
+  - DOMAIN-SUFFIX,gvt2.com,Google
+  - DOMAIN-SUFFIX,gvt3.com,Google
+  - DOMAIN-SUFFIX,googleapis.com,Google
+  - DOMAIN-SUFFIX,googleusercontent.com,Google
+  - DOMAIN-SUFFIX,google.com,Google
+  - DOMAIN-SUFFIX,gstatic.com,Google
+  - DOMAIN-SUFFIX,ggpht.com,Google
+  - DOMAIN-SUFFIX,android.com,Google
+  - DOMAIN-SUFFIX,googleplay.com,Google
+  - DOMAIN-KEYWORD,googleplay,Google
+  - DOMAIN-SUFFIX,gemini.google.com,Google
+  - DOMAIN-SUFFIX,gemini.google,Google
+  - DOMAIN-SUFFIX,aistudio.google.com,Google
+  - DOMAIN-SUFFIX,bard.google.com,Google
+  - DOMAIN-SUFFIX,deepmind.google,Google
+  - DOMAIN-SUFFIX,labs.google,Google
+  - DOMAIN-SUFFIX,labs.google.com,Google
+  - DOMAIN-SUFFIX,notebooklm.google,Google
+  - DOMAIN-SUFFIX,notebooklm.google.com,Google
+  - DOMAIN-SUFFIX,jules.google,Google
+  - DOMAIN-SUFFIX,jules.google.com,Google
+  - DOMAIN-SUFFIX,antigravity.google,Google
+  - DOMAIN-SUFFIX,generativeai.google,Google
+  - DOMAIN-SUFFIX,makersuite.google.com,Google
+  - DOMAIN-SUFFIX,ai.google.dev,Google
+  - DOMAIN-SUFFIX,generativelanguage.googleapis.com,Google
+  - RULE-SET,googlefcm,Google
+  - RULE-SET,google,Google
+  - DOMAIN-SUFFIX,anthropic.com,AI
+  - DOMAIN-SUFFIX,claude.ai,AI
+  - DOMAIN-SUFFIX,claude.com,AI
+  - DOMAIN-SUFFIX,claudeusercontent.com,AI
+  - DOMAIN-SUFFIX,openai.com,AI
+  - DOMAIN-SUFFIX,chatgpt.com,AI
+  - DOMAIN-SUFFIX,oaistatic.com,AI
+  - DOMAIN-SUFFIX,oaiusercontent.com,AI
+  - DOMAIN-SUFFIX,x.ai,AI
+  - DOMAIN-SUFFIX,grok.x.ai,AI
+  - IP-CIDR,160.79.104.0/21,AI,no-resolve
+  - RULE-SET,anthropic,AI
+  - RULE-SET,openai,AI
+  - RULE-SET,ai,AI
+  - RULE-SET,reject,REJECT
   - RULE-SET,direct,DIRECT
-  # QUIC tunneled over TCP performs poorly; browsers fall back to TCP right away
-  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
   - RULE-SET,proxy,Proxy
   - RULE-SET,gfw,Proxy
-  - RULE-SET,lancidr,DIRECT,no-resolve
-  # The CN IP rules resolve unmatched domains: domestic sites missing from the direct list would
-  # otherwise go through the proxy, and the server blocks Chinese IPs
+  # Unmatched domestic sites must go direct: the server blocks Chinese IPs
   - RULE-SET,cncidr,DIRECT
-  - GEOIP,LAN,DIRECT,no-resolve
   - GEOIP,CN,DIRECT
   - MATCH,Final

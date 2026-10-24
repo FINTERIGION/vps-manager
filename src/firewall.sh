@@ -168,15 +168,17 @@ fw_apply() {
         fw_has_v6 && { msg "(dry run, skipped) ip6tables-restore --noflush:"; fw_rules 6; }
         return 0
     fi
-    fw_rules 4 | fw_load iptables "$FW_CHAIN" INPUT || err "Failed to load IPv4 firewall rules"
-    fw_allowed | cut -f1 >"$FW_STAMP"
+    fw_rules 4 | fw_load iptables "$FW_CHAIN" INPUT || return 1
     if fw_has_v6; then
         if ! cmd_exists ip6tables; then
             warn "ip6tables not found, IPv6 inbound traffic is NOT filtered"
+            return 1
         elif ! fw_rules 6 | fw_load ip6tables "$FW_CHAIN" INPUT; then
             warn "Failed to load IPv6 firewall rules, IPv6 inbound traffic is NOT filtered"
+            return 1
         fi
     fi
+    fw_allowed | cut -f1 >"$FW_STAMP"
 }
 
 fw_guard_apply() {
@@ -204,8 +206,7 @@ fw_ports_ensure() {
     cur=$(fw_allowed | cut -f1)
     [[ $cur == "$(cat "$FW_STAMP" 2>/dev/null)" ]] && return 0
     msg "Allowed inbound ports changed (${cur//$'\n'/ }), reloading firewall rules"
-    # Subshell: fw_apply exits on failure, which would skip the traffic sync
-    (fw_apply) || warn "Failed to reload firewall rules, run: vpsm firewall reload"
+    fw_apply || warn "Failed to reload firewall rules, run: vpsm firewall reload"
 }
 
 fw_guard_text() {
@@ -232,7 +233,12 @@ fw_flush_all() {
 }
 
 # Re-apply the rules if the firewall is enabled (call after changing ports)
-fw_refresh() { fw_enabled && fw_apply; return 0; }
+fw_refresh() {
+    if fw_enabled; then
+        fw_apply || return 1
+    fi
+    return 0
+}
 
 fw_list() {
     local spec desc
@@ -280,7 +286,10 @@ fw_enable() {
             systemctl is-active --quiet "$s" && warn "$s is running; its rules also apply and may block ports allowed here"
         done
     fi
-    fw_apply
+    if ! fw_apply; then
+        fw_flush_input
+        err "Failed to load firewall rules (IPv4 and IPv6 must both apply when IPv6 is present). Install ip6tables or disable IPv6, then retry"
+    fi
     fw_guard_apply || warn "Failed to load the Xray API guard rule"
     db_write '.settings.firewall.enabled = true'
     svc enable "$FW_SVC" >/dev/null 2>&1 || warn "Failed to enable $FW_SVC, rules will not be restored after reboot"
@@ -300,7 +309,7 @@ fw_allow() {
     spec=$(fw_parse_spec "${1:-}") || err "Usage: vpsm firewall allow <port|from-to>[/tcp|/udp], e.g. 8080, 53/udp, 10000-20000/udp"
     fw_allowed | cut -f1 | grep -qx "$spec" && { msg "$spec is already allowed"; return 0; }
     db_write --arg s "$spec" '.settings.firewall.allow = ((.settings.firewall.allow // []) + [$s] | unique)'
-    fw_refresh
+    fw_refresh || warn "Firewall rules were not reloaded, run: vpsm firewall reload"
     ok "Allowed inbound $spec$(fw_enabled || echo ' (takes effect once the firewall is enabled)')"
 }
 
@@ -313,7 +322,7 @@ fw_deny() {
         err "$spec is not in the custom allow list"
     fi
     db_write --arg s "$spec" '.settings.firewall.allow -= [$s]'
-    fw_refresh
+    fw_refresh || warn "Firewall rules were not reloaded, run: vpsm firewall reload"
     ok "Removed $spec from the allow list"
 }
 
@@ -322,7 +331,7 @@ fw_reload() {
     fw_enabled && fw_ensure_tools
     fw_guard_apply || warn "Failed to load the Xray API guard rule (iptables owner match unavailable?)"
     if fw_enabled; then
-        fw_apply
+        fw_apply || err "Failed to load firewall rules (IPv4 and IPv6 must both apply)"
         ok "Firewall rules loaded"
     else
         fw_flush_input

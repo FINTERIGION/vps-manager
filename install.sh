@@ -39,16 +39,17 @@ FIREWALL="${VPSM_FIREWALL:-}"
 YES=""
 
 die() { echo "Error: $*" >&2; exit 1; }
+need_opt_arg() { [[ -n ${2:-} && $2 != --* ]] || die "$1 requires a value"; }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --domain) DOMAIN=$2; shift 2 ;;
-        --port) PORT=$2; shift 2 ;;
-        --name) NODE_NAME=$2; shift 2 ;;
-        --user) FIRST_USER=$2; shift 2 ;;
-        --quota) QUOTA=$2; shift 2 ;;
-        --expire) EXPIRE=$2; shift 2 ;;
-        --reset-day) RESET_DAY=$2; shift 2 ;;
+        --domain) need_opt_arg "$1" "${2:-}"; DOMAIN=$2; shift 2 ;;
+        --port) need_opt_arg "$1" "${2:-}"; PORT=$2; shift 2 ;;
+        --name) need_opt_arg "$1" "${2:-}"; NODE_NAME=$2; shift 2 ;;
+        --user) need_opt_arg "$1" "${2:-}"; FIRST_USER=$2; shift 2 ;;
+        --quota) need_opt_arg "$1" "${2:-}"; QUOTA=$2; shift 2 ;;
+        --expire) need_opt_arg "$1" "${2:-}"; EXPIRE=$2; shift 2 ;;
+        --reset-day) need_opt_arg "$1" "${2:-}"; RESET_DAY=$2; shift 2 ;;
         --firewall) FIREWALL=y; shift ;;
         -y | --yes) YES=1; shift ;;
         -h | --help) usage; exit 0 ;;
@@ -119,7 +120,7 @@ install_deps() {
 fetch_scripts() {
     local here
     here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
-    if [[ -f $here/src/core.sh && -f $here/vpsm.sh ]]; then
+    if [[ -f $here/src/core.sh && -f $here/vpsm.sh && -d $here/templates && -d $here/systemd ]]; then
         SRC_DIR=$here
         return 0
     fi
@@ -128,7 +129,8 @@ fetch_scripts() {
     echo "Downloading scripts $REPO@$REF ..."
     curl -fsSL --retry 3 -o "$DL_TMP/s.tgz" "https://github.com/$REPO/archive/$REF.tar.gz" || die "Failed to download scripts"
     tar -xzf "$DL_TMP/s.tgz" -C "$DL_TMP" --strip-components=1 || die "Failed to extract scripts"
-    [[ -f $DL_TMP/src/core.sh && -f $DL_TMP/vpsm.sh ]] || die "Downloaded scripts are incomplete ($REPO@$REF)"
+    [[ -f $DL_TMP/src/core.sh && -f $DL_TMP/vpsm.sh && -d $DL_TMP/templates && -d $DL_TMP/systemd ]] ||
+        die "Downloaded scripts are incomplete ($REPO@$REF)"
     SRC_DIR=$DL_TMP
 }
 
@@ -153,22 +155,49 @@ for _lib in xray traffic sub caddy user firewall manage; do
 done
 
 # ---------- Prompt for parameters ----------
-ask DOMAIN "Domain (must already resolve to this server's IP)" ""
-valid_domain "$DOMAIN" || die "Invalid domain: $DOMAIN"
-ask PORT "Xray listen port" 443
-valid_port "$PORT" || die "Invalid port: $PORT"
-valid_xray_port "$PORT" || die "Port $PORT is used internally by vpsm (80 / $CADDY_PORT / $API_PORT), choose another"
-ask NODE_NAME "Node/subscription name shown in clients" "$DOMAIN"
-valid_node_name "$NODE_NAME" || die "Invalid name: $NODE_NAME (1-64 characters without quotes, backslashes or control characters, and not a Clash policy/group name)"
-ask FIRST_USER "First username" admin
-valid_name "$FIRST_USER" || die "Username may only contain letters, digits, underscores and hyphens, length 1-32 (\"all\" is reserved)"
-ask QUOTA "Monthly traffic for this user (e.g. 200G, 0=unlimited)" 0
-parse_quota "$QUOTA" >/dev/null || die "Invalid traffic: $QUOTA (e.g. 200G / 500M / 1.5T / 0, max 1024T)"
-ask EXPIRE "Expiry for this user (e.g. 30d / 2026-12-31, 0=never)" 0
-parse_expire "$EXPIRE" >/dev/null || die "Invalid expiry format: $EXPIRE"
-ask RESET_DAY "Monthly traffic reset day (1-28, shared by all users)" 1
-[[ $RESET_DAY =~ ^[0-9]+$ ]] && ((10#$RESET_DAY >= 1 && 10#$RESET_DAY <= 28)) || die "Reset day must be between 1 and 28"
-RESET_DAY=$((10#$RESET_DAY))
+RESUME=""
+if [[ -s $DB ]] && jq -e '.settings.domain != "" and .settings.private_key != "" and .settings.port != null' "$DB" >/dev/null 2>&1; then
+    RESUME=1
+    msg "Existing keys and users in $DB will be kept"
+    DOMAIN=$(db_get '.settings.domain')
+    PORT=$(db_get '.settings.port')
+    NODE_NAME=$(node_name)
+    RESET_DAY=$(db_get '.settings.reset_day')
+    _existing=$(db_get '.users[0].name // empty')
+    [[ -n $_existing ]] && FIRST_USER=$_existing
+    QUOTA=${QUOTA:-0}
+    EXPIRE=${EXPIRE:-0}
+    unset _existing
+fi
+
+if [[ -z $RESUME ]]; then
+    ask DOMAIN "Domain (must already resolve to this server's IP)" ""
+    valid_domain "$DOMAIN" || die "Invalid domain: $DOMAIN"
+    ask PORT "Xray listen port" 443
+    valid_port "$PORT" || die "Invalid port: $PORT"
+    valid_xray_port "$PORT" || die "Port $PORT is used internally by vpsm (80 / $CADDY_PORT / $API_PORT), choose another"
+    ask NODE_NAME "Node/subscription name shown in clients" "$DOMAIN"
+    # Name equal to the domain is stored as empty and may exceed the 64-character node-name limit
+    if [[ $NODE_NAME != "$DOMAIN" ]]; then
+        valid_node_name "$NODE_NAME" || die "Invalid name: $NODE_NAME (1-64 characters without quotes, backslashes or control characters, and not a Clash policy/group name)"
+    fi
+    ask FIRST_USER "First username" admin
+    valid_name "$FIRST_USER" || die "Username may only contain letters, digits, underscores and hyphens, length 1-32 (\"all\" is reserved)"
+    ask QUOTA "Monthly traffic for this user (e.g. 200G, 0=unlimited)" 0
+    parse_quota "$QUOTA" >/dev/null || die "Invalid traffic: $QUOTA (e.g. 200G / 500M / 1.5T / 0, max 1024T)"
+    ask EXPIRE "Expiry for this user (e.g. 30d / 2026-12-31, 0=never)" 0
+    parse_expire "$EXPIRE" >/dev/null || die "Invalid expiry format: $EXPIRE"
+    ask RESET_DAY "Monthly traffic reset day (1-28, shared by all users)" 1
+    [[ $RESET_DAY =~ ^[0-9]+$ ]] && ((10#$RESET_DAY >= 1 && 10#$RESET_DAY <= 28)) || die "Reset day must be between 1 and 28"
+    RESET_DAY=$((10#$RESET_DAY))
+elif [[ -z $FIRST_USER ]]; then
+    ask FIRST_USER "First username" admin
+    valid_name "$FIRST_USER" || die "Username may only contain letters, digits, underscores and hyphens, length 1-32 (\"all\" is reserved)"
+    ask QUOTA "Monthly traffic for this user (e.g. 200G, 0=unlimited)" 0
+    parse_quota "$QUOTA" >/dev/null || die "Invalid traffic: $QUOTA (e.g. 200G / 500M / 1.5T / 0, max 1024T)"
+    ask EXPIRE "Expiry for this user (e.g. 30d / 2026-12-31, 0=never)" 0
+    parse_expire "$EXPIRE" >/dev/null || die "Invalid expiry format: $EXPIRE"
+fi
 ask FIREWALL "Enable iptables firewall (allow only SSH, 80 and $PORT inbound, reject the rest)? (y/n)" n
 [[ ${FIREWALL,,} =~ ^(y|yes|1|true)$ ]] && FIREWALL=1 || FIREWALL=""
 
@@ -198,12 +227,14 @@ install_xray
 install_caddy
 bin_drop_backup xray geoip.dat xray.version caddy caddy.version
 
-pair=$(gen_x25519) || die "Failed to generate Reality key pair"
-priv=$(sed -n 1p <<<"$pair")
-pub=$(sed -n 2p <<<"$pair")
-db_init "$DOMAIN" "$PORT" "$priv" "$pub" "$(gen_hex 4)" "$RESET_DAY"
-# Left unset when it equals the domain, so the name keeps following later domain changes
-[[ $NODE_NAME != "$DOMAIN" ]] && db_write --arg n "$NODE_NAME" '.settings.name = $n'
+if [[ -z $RESUME ]]; then
+    pair=$(gen_x25519) || die "Failed to generate Reality key pair"
+    priv=$(sed -n 1p <<<"$pair")
+    pub=$(sed -n 2p <<<"$pair")
+    db_init "$DOMAIN" "$PORT" "$priv" "$pub" "$(gen_hex 4)" "$RESET_DAY"
+    # Left unset when it equals the domain, so the name keeps following later domain changes
+    [[ $NODE_NAME != "$DOMAIN" ]] && db_write --arg n "$NODE_NAME" '.settings.name = $n'
+fi
 
 caddy_gen
 if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
@@ -213,7 +244,13 @@ fi
 fix_perms
 
 # Create the first user (also generates config.json and subscription files)
-user_add "$FIRST_USER" "$QUOTA" "$EXPIRE" || die "Failed to create user"
+if [[ -n $FIRST_USER ]] && user_exists "$FIRST_USER"; then
+    xray_gen_config
+    sub_regen force
+    msg "Keeping existing user $FIRST_USER"
+else
+    user_add "$FIRST_USER" "$QUOTA" "$EXPIRE" || die "Failed to create user"
+fi
 fix_perms
 
 if [[ -z ${VPSM_NO_SERVICE:-} ]]; then

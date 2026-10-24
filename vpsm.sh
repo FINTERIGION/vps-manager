@@ -14,7 +14,7 @@ unset _lib
 pause() { read -r -s -n 1 -p "Press any key to return to the menu..." _ && echo; }
 
 # Read one value in the menu; empty input returns empty
-ask() { local v; read -r -p "$1" v; echo "$v"; }
+ask() { local v; read -r -p "$1" v; printf '%s\n' "$v"; }
 
 # pick_user [prompt]: list users, then read a username
 pick_user() {
@@ -47,7 +47,11 @@ EOF
             5) n=$(pick_user); a=$(ask "New expiry (2026-12-31 / 30d / +30d / 0): "); run_locked user_expire "$n" "$a" ;;
             6) n=$(pick_user); run_locked user_reset "$n" ;;
             7) n=$(pick_user); a=$(ask "Enable (e) or disable (d)? [e/d]: ")
-               if [[ $a == d ]]; then run_locked user_disable "$n"; else run_locked user_enable "$n"; fi ;;
+               case ${a,,} in
+                   d | disable) run_locked user_disable "$n" ;;
+                   e | enable) run_locked user_enable "$n" ;;
+                   *) echo "Please enter e or d" ;;
+               esac ;;
             8) a=$(ask "Monthly reset day (1-28): "); run_locked set_reset_day "$a" ;;
             9) run_locked set_node_name
                a=$(ask "New node/subscription name (0 = use the domain, Enter to return): ")

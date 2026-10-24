@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.4.0"
+VPSM_VERSION="1.5.0"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Without VPSM_ROOT (e.g. the /usr/local/bin/vpsm symlink), use the installation these scripts live in
@@ -150,7 +150,7 @@ valid_shortid() { [[ $1 =~ ^([0-9a-fA-F]{2}){1,8}$ ]]; }
 valid_node_name() {
     [[ -n $1 && ${#1} -le 64 && $1 != *[\"\\[:cntrl:]]* ]] || return 1
     case $1 in
-        DIRECT | REJECT | REJECT-DROP | PASS | COMPATIBLE | Proxy | Steam | AdBlock | Final) return 1 ;;
+        DIRECT | REJECT | REJECT-DROP | PASS | COMPATIBLE | Proxy | AI | Google | Telegram | Steam | Final) return 1 ;;
     esac
 }
 
@@ -367,6 +367,7 @@ svc_dir() {
 fix_perms() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
     [[ -f $XRAY_CONF ]] && chown root:root "$XRAY_CONF" && chmod 600 "$XRAY_CONF"
+    [[ -f $DB ]] && chmod 600 "$DB"
     getent group "$SVC_USER" >/dev/null 2>&1 || return 0
     chmod 755 "$ROOT"
     svc_dir "$SUB_DIR"

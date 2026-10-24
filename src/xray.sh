@@ -101,7 +101,15 @@ xray_adu() {
 # xray_gen_config must have been called beforehand. A restart also drops all existing connections,
 # so deleting/disabling users (including over-quota and expired) always restarts, ensuring
 # disabled users' existing connections are cut off immediately.
+# xray_restart [force]: without force, a failed pull aborts so counters are not discarded.
+# force still restarts after a warning (port/key changes must apply even if stats cannot be read).
 xray_restart() {
-    xray_active && traffic_pull
+    local force=${1:-}
+    if xray_active; then
+        if ! traffic_pull && ! traffic_pull; then
+            warn "Failed to persist Xray traffic counters"
+            [[ $force == force ]] || return 1
+        fi
+    fi
     svc restart "$XRAY_SVC"
 }

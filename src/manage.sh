@@ -21,7 +21,7 @@ restart_changed_units() {
     local u
     for u in $UNITS_CHANGED; do
         case $u in
-            vpsm-xray.service) xray_active && xray_restart && ok "Restarted $XRAY_SVC (unit updated)" ;;
+            vpsm-xray.service) xray_active && xray_restart force && ok "Restarted $XRAY_SVC (unit updated)" ;;
             vpsm-caddy.service) svc_active "$CADDY_SVC" && svc restart "$CADDY_SVC" && ok "Restarted $CADDY_SVC (unit updated)" ;;
             vpsm-traffic.timer) svc try-restart vpsm-traffic.timer ;;
         esac
@@ -48,7 +48,9 @@ svc_start() {
 svc_stop() {
     local s list
     list=$(svc_targets "${1:-}") || return 1
-    [[ ${1:-all} != caddy ]] && xray_active && traffic_pull
+    if [[ ${1:-all} != caddy ]] && xray_active; then
+        traffic_pull || traffic_pull || err "Failed to persist Xray traffic, not stopping"
+    fi
     for s in $list; do svc stop "$s" && ok "Stopped $s"; done
 }
 
@@ -57,7 +59,7 @@ svc_restart() {
     svc_targets "$t" >/dev/null
     if [[ $t != caddy ]]; then
         xray_gen_config
-        xray_restart
+        xray_restart force
         ok "Restarted $XRAY_SVC"
     fi
     if [[ $t != xray ]]; then
@@ -115,17 +117,19 @@ update_core() {
     local files=(xray geoip.dat xray.version) tag new
     tag=$(update_target_tag XTLS/Xray-core "$BIN_DIR/xray.version" "${1:-}") || return 1
     [[ -n $tag ]] || { ok "Xray is already the latest version ($(cat "$BIN_DIR/xray.version"))"; return 0; }
-    xray_active && traffic_pull
+    if xray_active; then
+        traffic_pull || traffic_pull || err "Failed to persist traffic, Xray not updated"
+    fi
     install_xray "$tag"
     new=$(cat "$BIN_DIR/xray.version")
-    if (xray_gen_config) && svc restart "$XRAY_SVC" && svc_settled "$XRAY_SVC"; then
+    if (xray_gen_config) && xray_restart force && svc_settled "$XRAY_SVC"; then
         bin_drop_backup "${files[@]}"
         ok "Xray updated to $new"
         return 0
     fi
     bin_restore "${files[@]}" ||
         err "Xray $new failed to start and there is no previous version to roll back to, check: journalctl -u $XRAY_SVC -n 50"
-    xray_restart
+    xray_restart force
     warn "Xray $new failed to start, rolled back to $(cat "$BIN_DIR/xray.version"); check: journalctl -u $XRAY_SVC -n 50"
     return 1
 }
@@ -161,22 +165,45 @@ update_sh() {
         rm -rf "$tmp"
         err "Failed to download scripts"
     fi
-    [[ -f $tmp/vpsm.sh && -d $tmp/src ]] || { rm -rf "$tmp"; err "Downloaded content is incomplete"; }
-    # Swap the whole directory via rename so the running script is unaffected
+    [[ -f $tmp/vpsm.sh && -d $tmp/src && -d $tmp/templates && -d $tmp/systemd ]] || {
+        rm -rf "$tmp"
+        err "Downloaded content is incomplete"
+    }
+    # Stage into sh.new, then rename so a failed swap can restore sh.old
     new="$ROOT/sh.new"
     rm -rf "$new"
     mkdir -p "$new"
-    cp -r "$tmp/vpsm.sh" "$tmp/src" "$tmp/templates" "$tmp/systemd" "$new/"
+    if ! cp -r "$tmp/vpsm.sh" "$tmp/src" "$tmp/templates" "$tmp/systemd" "$new/"; then
+        rm -rf "$new" "$tmp"
+        err "Failed to stage new scripts"
+    fi
     chmod 755 "$new/vpsm.sh"
+    [[ -f $new/vpsm.sh && -d $new/src && -d $new/templates && -d $new/systemd ]] || {
+        rm -rf "$new" "$tmp"
+        err "Staged scripts are incomplete"
+    }
+    rm -rf "$tmp"
     rm -rf "$ROOT/sh.old"
-    mv "$ROOT/sh" "$ROOT/sh.old" && mv "$new" "$ROOT/sh"
-    rm -rf "$ROOT/sh.old" "$tmp"
+    if ! mv "$ROOT/sh" "$ROOT/sh.old"; then
+        rm -rf "$new"
+        err "Failed to replace scripts"
+    fi
+    if ! mv "$new" "$ROOT/sh"; then
+        mv "$ROOT/sh.old" "$ROOT/sh"
+        rm -rf "$new"
+        err "Failed to replace scripts, previous version restored"
+    fi
     install_units
     restart_changed_units
     # Regenerate with the new scripts so template/Caddyfile changes apply now; they inherit our lock
-    VPSM_LOCK_HELD=1 "$ROOT/sh/vpsm.sh" regen ||
-        warn "Failed to regenerate configs with the new scripts, run: vpsm regen"
-    ok "Scripts updated to $("$ROOT/sh/vpsm.sh" version)"
+    if VPSM_LOCK_HELD=1 "$ROOT/sh/vpsm.sh" regen; then
+        rm -rf "$ROOT/sh.old"
+        ok "Scripts updated to $("$ROOT/sh/vpsm.sh" version)"
+    else
+        warn "Failed to regenerate configs with the new scripts; previous scripts kept at $ROOT/sh.old"
+        warn "Retry with: vpsm regen   Restore with: rm -rf $ROOT/sh && mv $ROOT/sh.old $ROOT/sh"
+        return 1
+    fi
 }
 
 update_cmd() {
@@ -194,6 +221,7 @@ update_cmd() {
 }
 
 enable_bbr() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && { msg "(dry run, skipped) enable BBR"; return 0; }
     local cc
     cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
     if [[ $cc == bbr ]]; then
@@ -221,12 +249,15 @@ do_uninstall() {
     svc disable --now "$CADDY_SVC" 2>/dev/null
     svc disable --now "$FW_SVC" 2>/dev/null
     fw_flush_all
-    if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
-        rm -f /etc/systemd/system/vpsm-{xray,caddy,traffic,firewall}.service /etc/systemd/system/vpsm-traffic.timer
-        rm -f /usr/local/bin/vpsm /etc/sysctl.d/99-vpsm-bbr.conf
-        systemctl daemon-reload
-        userdel "$SVC_USER" 2>/dev/null
+    if [[ -n ${VPSM_NO_SERVICE:-} ]]; then
+        msg "(dry run, skipped) remove unit files, $ROOT and the vpsm user"
+        ok "Uninstalled (dry run)"
+        return 0
     fi
+    rm -f /etc/systemd/system/vpsm-{xray,caddy,traffic,firewall}.service /etc/systemd/system/vpsm-traffic.timer
+    rm -f /usr/local/bin/vpsm /etc/sysctl.d/99-vpsm-bbr.conf
+    systemctl daemon-reload
+    userdel "$SVC_USER" 2>/dev/null
     # This script lives in $ROOT/sh and has already been read by bash, so deleting it is safe
     rm -rf "$ROOT"
     ok "Uninstalled"
@@ -244,7 +275,7 @@ Users:
    info <name>                   User details and subscription URL
    sub <name>                    Show the Clash subscription URL
    qr <name>                     Subscription URL as a QR code (requires qrencode)
-   url <name>                    Single-node vless:// share link
+   url <name>                    Single-node vless:// share link (needs Reality MLKEM; prefer sub)
    quota <name> <traffic>        Set the monthly traffic quota (0=unlimited)
    expire <name> <date>          Set expiry: 2026-12-31 | 30d | +30d(extend) | 0
    reset <name|all>              Reset used traffic to zero

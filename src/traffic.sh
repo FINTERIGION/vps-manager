@@ -4,8 +4,12 @@
 # Read and reset counters from Xray, adding them to the database
 traffic_pull() {
     xray_active || return 0
-    local out
-    out=$(timeout 15 "$XRAY_BIN" api statsquery -s "$API_ADDR" -pattern "user>>>" -reset 2>/dev/null) || return 1
+    local out rc=0
+    out=$(timeout 15 "$XRAY_BIN" api statsquery -s "$API_ADDR" -pattern "user>>>" -reset 2>/dev/null) || rc=$?
+    if ((rc != 0)); then
+        [[ -n $out ]] && (umask 077; echo "$out" >"$ROOT/stats.lost.$(date +%s).json")
+        return 1
+    fi
     [[ -n $out ]] || return 0
     # Subshell: db_write exits on failure, which would skip the recovery below
     if ! (db_write --argjson raw "$out" '
@@ -60,11 +64,14 @@ traffic_evaluate() {
             | .disabled_reason = $r | .enabled = ($r == ""))'
 }
 
-# Call after a command modifies the database: apply_state <state_snapshot before the change> [force]
-# Re-evaluates states and applies changes to config.json / the running Xray / subscription files
+# Call after a command modifies the database: apply_state <snapshot> [force] [skip]
+# Re-evaluates states and applies changes to config.json / the running Xray / subscription files.
+# skip: do not pull again (caller already reset counters and must not add post-reset traffic back)
 apply_state() {
-    local snap=$1 force=${2:-} changes name op fallback=""
-    traffic_pull || warn "Failed to read Xray traffic stats"
+    local snap=$1 force=${2:-} skip_pull=${3:-} changes name op fallback=""
+    if [[ -z $skip_pull ]]; then
+        traffic_pull || warn "Failed to read Xray traffic stats"
+    fi
     traffic_evaluate
     changes=$(state_diff "$snap")
     # Always regenerated, so a config left stale by an earlier failed command is repaired on the next sync
@@ -83,7 +90,7 @@ apply_state() {
             fi
             if [[ -n $fallback ]]; then
                 msg "Restarting Xray to apply user changes..."
-                xray_restart
+                xray_restart force
             fi
         fi
         force=1
@@ -97,6 +104,11 @@ sync_all() {
     local snap
     fw_guard_ensure
     fw_ports_ensure
+    if caddy_stale; then
+        warn "Caddyfile does not match the current domain/port, regenerating"
+        caddy_gen
+        caddy_reload
+    fi
     snap=$(state_snapshot)
     apply_state "$snap"
 }

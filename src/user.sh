@@ -10,14 +10,20 @@ user_status_text() {
     esac
 }
 
-# Next traffic reset date
+# Next traffic reset date. If this month's day has passed but the timer has not
+# written last_reset yet, show today (the reset is pending), not a past date.
 next_reset_date() {
-    local rd last month
+    local rd last month day
     rd=$(db_get '.settings.reset_day')
     last=$(db_get '.settings.last_reset')
     month=$(date +%Y-%m)
+    day=$((10#$(date +%d)))
+    [[ $rd =~ ^[0-9]+$ ]] || rd=1
     if [[ $last == "$month" ]]; then
         month=$(date -d "$(date +%Y-%m-01) +1 month" +%Y-%m)
+    elif ((day >= 10#$rd)); then
+        date +%F
+        return
     fi
     printf '%s-%02d' "$month" "$rd"
 }
@@ -106,6 +112,7 @@ user_info() {
     echo "Expires:      ${expire:-never}"
     echo "Next reset:   $(next_reset_date)"
     echo "Subscription: $(sub_url "$n")"
+    echo "Share link:   $(vless_share_url "$n")"
 }
 
 user_sub() {
@@ -114,12 +121,17 @@ user_sub() {
 }
 
 # Generic vless:// share link (single-node import for v2rayN / Shadowrocket / NekoBox, etc.)
-user_url() {
-    require_user "${1:-}"
+# support-x25519mlkem768 matches the Clash template: Xray >= 26.9.8 rejects ClientHellos without it
+vless_share_url() {
     local domain port
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
-    echo "vless://$(user_get "$1" '.uuid')@$domain:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain&fp=chrome&pbk=$(db_get '.settings.public_key')&sid=$(db_get '.settings.short_ids[0]')&type=tcp#$(urlencode "$(node_name)")"
+    echo "vless://$(user_get "$1" '.uuid')@$domain:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain&fp=chrome&pbk=$(db_get '.settings.public_key')&sid=$(db_get '.settings.short_ids[0]')&type=tcp&support-x25519mlkem768=true#$(urlencode "$(node_name)")"
+}
+
+user_url() {
+    require_user "${1:-}"
+    vless_share_url "$1"
 }
 
 user_qr() {
@@ -160,14 +172,14 @@ user_reset() {
         snap=$(state_snapshot)
         traffic_pull
         db_write '.users |= map(.up = 0 | .down = 0)'
-        apply_state "$snap" force
+        apply_state "$snap" force skip
         ok "Traffic reset for all users"
     else
         require_user "$1"
         snap=$(state_snapshot)
         traffic_pull
         db_write --arg n "$1" '.users |= map(if .name == $n then .up = 0 | .down = 0 else . end)'
-        apply_state "$snap" force
+        apply_state "$snap" force skip
         ok "Traffic reset for user $1"
     fi
 }
@@ -213,7 +225,6 @@ set_reset_day() {
     [[ $d =~ ^[0-9]+$ ]] && ((10#$d >= 1 && 10#$d <= 28)) || err "Usage: vpsm reset-day <1-28>"
     d=$((10#$d))
     db_write --argjson rd "$d" --arg lr "$(calc_last_reset "$d")" '.settings.reset_day = $rd | .settings.last_reset = $lr'
-    sub_regen force
     ok "All users' traffic will reset on day $d of each month, next reset: $(next_reset_date)"
 }
 
@@ -225,18 +236,27 @@ set_port() {
         return 0
     fi
     [[ -z ${VPSM_NO_SERVICE:-} ]] && port_in_use "$1" && err "Port $1 is already in use by another program (ss -ltnp 'sport = :$1')"
-    db_write --argjson p "$1" '.settings.port = $p'
-    fw_refresh
+    local old new=$1
+    old=$(db_get '.settings.port')
+    db_write --argjson p "$new" '.settings.port = $p'
     xray_gen_config
-    xray_active && xray_restart
     # The http:// redirect points at the port
     caddy_gen
     sub_regen force
+    if fw_enabled && ! fw_apply; then
+        db_write --argjson p "$old" '.settings.port = $p'
+        xray_gen_config
+        caddy_gen
+        sub_regen force
+        fw_apply || warn "Firewall may still allow port $new, run: vpsm firewall reload"
+        err "Failed to update firewall for port $new, listen port not changed"
+    fi
+    xray_active && xray_restart force
     caddy_reload
     if fw_enabled; then
-        ok "Listen port changed to $1 (vpsm firewall updated; subscriptions/client nodes have been updated)"
+        ok "Listen port changed to $new (vpsm firewall updated; subscriptions/client nodes have been updated)"
     else
-        ok "Listen port changed to $1 (make sure the firewall allows it; subscriptions/client nodes have been updated)"
+        ok "Listen port changed to $new (make sure the firewall allows it; subscriptions/client nodes have been updated)"
     fi
 }
 
@@ -245,7 +265,7 @@ set_domain() {
     db_write --arg d "$1" '.settings.domain = $d'
     caddy_gen
     xray_gen_config
-    xray_active && xray_restart
+    xray_active && xray_restart force
     sub_regen force
     caddy_reload
     ok "Domain changed to $1, Caddy will obtain a certificate for it automatically"
@@ -293,7 +313,7 @@ set_key() {
     pub=$(sed -n 2p <<<"$pair")
     db_write --arg a "$priv" --arg b "$pub" '.settings.private_key = $a | .settings.public_key = $b'
     xray_gen_config
-    xray_active && xray_restart
+    xray_active && xray_restart force
     sub_regen force
     ok "Key pair updated, public key: $pub (clients just need to refresh their subscription)"
 }
@@ -304,7 +324,7 @@ set_shortid() {
     valid_shortid "$sid" || err "shortId must be a hex string of even length between 2 and 16"
     db_write --arg s "$sid" '.settings.short_ids = [$s]'
     xray_gen_config
-    xray_active && xray_restart
+    xray_active && xray_restart force
     sub_regen force
     ok "shortId updated to $sid (clients just need to refresh their subscription)"
 }
@@ -313,11 +333,11 @@ set_shortid() {
 regen_all() {
     xray_gen_config
     # Later syncs see an unchanged config.json, so the running Xray must pick it up now
-    [[ -n $XRAY_CONF_CHANGED ]] && xray_active && xray_restart
+    [[ -n $XRAY_CONF_CHANGED ]] && xray_active && xray_restart force
     caddy_gen
     sub_regen force
     caddy_reload
-    fw_refresh
+    fw_refresh || warn "Firewall rules were not reloaded, run: vpsm firewall reload"
     ok "Configs regenerated"
 }
 
@@ -326,10 +346,11 @@ edit_rules() {
     if [[ ! -f $CUSTOM_RULES ]]; then
         cat >"$CUSTOM_RULES" <<'EOF'
 # Custom Clash rules, one per line, inserted before all built-in rules (highest priority)
-# Available policy groups: Proxy / Steam / AdBlock / Final / DIRECT / REJECT
+# Available policy groups: Proxy / AI / Google / Telegram / Steam / Final / DIRECT / REJECT
 # Examples:
 # DOMAIN-SUFFIX,example.com,Proxy
-# DOMAIN-KEYWORD,tracker,AdBlock
+# DOMAIN-SUFFIX,openai.com,AI
+# DOMAIN-SUFFIX,googleapis.cn,Google
 # IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
 EOF
     fi

@@ -68,6 +68,21 @@ $body
 EOF
 }
 
+# True when Caddyfile is missing or its domain / HTTPS redirect port do not match users.json
+caddy_stale() {
+    local domain port want
+    [[ -f $CADDYFILE ]] || return 0
+    domain=$(db_get '.settings.domain')
+    port=$(db_get '.settings.port')
+    if [[ $port == 443 ]]; then
+        want="redir https://$domain{uri}"
+    else
+        want="redir https://$domain:$port{uri}"
+    fi
+    grep -qF "$want" "$CADDYFILE" && grep -qF "$domain:$CADDY_PORT {" "$CADDYFILE" && return 1
+    return 0
+}
+
 # Generate the Caddyfile and the decoy homepage
 caddy_gen() {
     local domain port
