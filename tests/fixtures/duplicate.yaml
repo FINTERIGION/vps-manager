@@ -1,0 +1,10 @@
+proxies:
+  - name: Same
+    type: ss
+    server: 198.51.100.10
+    port: 8388
+  - name: Same
+    type: trojan
+    server: 198.51.100.20
+    port: 443
+    password: example

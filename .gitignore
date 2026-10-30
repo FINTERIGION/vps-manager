@@ -1,0 +1,7 @@
+.dev/
+tmp/
+.test.*/
+tests/.jq-root/
+tests/*.deb
+__pycache__/
+*.pyc

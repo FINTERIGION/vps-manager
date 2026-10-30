@@ -1,0 +1,340 @@
+# vpsm subscription - user: __USER__
+# Requires the Mihomo (Clash Meta) core: original Clash does not support VLESS Reality
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+unified-delay: true
+tcp-concurrent: true
+geo-auto-update: true
+geo-update-interval: 24
+geox-url:
+  geosite: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+  mmdb: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb"
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+hosts:
+  dns.alidns.com:
+    - 223.5.5.5
+    - 223.6.6.6
+  doh.pub:
+    - 1.12.12.12
+    - 120.53.53.53
+  dns.cloudflare.com:
+    - 1.1.1.1
+    - 1.0.0.1
+  dns.google:
+    - 8.8.8.8
+    - 8.8.4.4
+
+dns:
+  enable: true
+  ipv6: false
+  use-hosts: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "*.localhost"
+    - "+.stun.*.*"
+    - "+.stun.*.*.*"
+    - "+.stun.*.*.*.*"
+    - "localhost.ptlogin2.qq.com"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "+.srv.nintendo.net"
+    - "+.stun.playstation.net"
+    - "+.xboxlive.com"
+    - geosite:private
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  proxy-server-nameserver:
+    - https://dns.alidns.com/dns-query#DIRECT
+    - https://doh.pub/dns-query#DIRECT
+  nameserver:
+    - "https://dns.cloudflare.com/dns-query#Proxy-DNS"
+    - "https://dns.google/dns-query#Proxy-DNS"
+  direct-nameserver:
+    - https://dns.alidns.com/dns-query#DIRECT
+    - https://doh.pub/dns-query#DIRECT
+  nameserver-policy:
+    "geosite:cn,private":
+      - https://dns.alidns.com/dns-query#DIRECT
+      - https://doh.pub/dns-query#DIRECT
+
+sniffer:
+  enable: true
+  force-dns-mapping: true
+  override-destination: true
+  parse-pure-ip: true
+  sniff:
+    TLS:
+      ports: [443, 8443]
+    HTTP:
+      ports: [80, 8080-8880]
+
+proxies:
+  - name: "__NODE__"  # vpsm-local
+    type: vless
+    server: __SERVER__
+    port: __PORT__
+    uuid: __UUID__
+    network: tcp
+    udp: true
+    ip-version: ipv4
+    tls: true
+    flow: xtls-rprx-vision
+    servername: __SNI__
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: __PBK__
+      short-id: __SID__
+      support-x25519mlkem768: true
+  # __EXTRA_PROXIES__
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - "__NODE__"
+      # __EXTRA_NAMES__
+      - DIRECT
+  - name: AI
+    type: select
+    proxies:
+      - Proxy
+      - "__NODE__"
+      # __EXTRA_NAMES__
+      - DIRECT
+  - name: Google
+    type: select
+    proxies:
+      - Proxy
+      - "__NODE__"
+      # __EXTRA_NAMES__
+      - DIRECT
+  - name: Steam
+    type: select
+    proxies:
+      - Proxy
+      - DIRECT
+      - "__NODE__"
+      # __EXTRA_NAMES__
+  - name: Final
+    type: select
+    proxies:
+      - Proxy
+      - DIRECT
+  - name: Proxy-DNS
+    type: fallback
+    hidden: true
+    url: "https://www.gstatic.com/generate_204"
+    interval: 300
+    proxies:
+      - "__NODE__"
+      # __EXTRA_NAMES__
+
+# testingcf.jsdelivr.net is reachable from China without a proxy
+rule-providers:
+  reject:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/reject.txt"
+    path: ./ruleset/reject.yaml
+    interval: 86400
+  ai:
+    type: http
+    behavior: domain
+    format: text
+    url: "https://testingcf.jsdelivr.net/gh/666OS/rules@release/mihomo/domain/AI.txt"
+    path: ./ruleset/ai.txt
+    interval: 86400
+  openai:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/openai.yaml"
+    path: ./ruleset/openai.yaml
+    interval: 86400
+  anthropic:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/anthropic.yaml"
+    path: ./ruleset/anthropic.yaml
+    interval: 86400
+  google:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/google.yaml"
+    path: ./ruleset/google.yaml
+    interval: 86400
+  googlefcm:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/googlefcm.yaml"
+    path: ./ruleset/googlefcm.yaml
+    interval: 86400
+  telegram:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/telegram.yaml"
+    path: ./ruleset/telegram.yaml
+    interval: 86400
+  telegramcidr:
+    type: http
+    behavior: ipcidr
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/telegramcidr.txt"
+    path: ./ruleset/telegramcidr.yaml
+    interval: 86400
+  steam-cn:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam@cn.yaml"
+    path: ./ruleset/steam-cn.yaml
+    interval: 86400
+  steam:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/steam.yaml"
+    path: ./ruleset/steam.yaml
+    interval: 86400
+  proxy:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/proxy.txt"
+    path: ./ruleset/proxy.yaml
+    interval: 86400
+  direct:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/direct.txt"
+    path: ./ruleset/direct.yaml
+    interval: 86400
+  private:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/private.txt"
+    path: ./ruleset/private.yaml
+    interval: 86400
+  gfw:
+    type: http
+    behavior: domain
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt"
+    path: ./ruleset/gfw.yaml
+    interval: 86400
+  cncidr:
+    type: http
+    behavior: ipcidr
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/cncidr.txt"
+    path: ./ruleset/cncidr.yaml
+    interval: 86400
+  lancidr:
+    type: http
+    behavior: ipcidr
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/lancidr.txt"
+    path: ./ruleset/lancidr.yaml
+    interval: 86400
+  applications:
+    type: http
+    behavior: classical
+    url: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/applications.txt"
+    path: ./ruleset/applications.yaml
+    interval: 86400
+
+rules:
+  # __CUSTOM_RULES__
+  # Server addresses go direct because the Xray server blocks proxied connections to itself
+  # __SERVER_RULES__
+  - DST-PORT,853,REJECT
+  - IP-CIDR,8.8.8.8/32,Proxy,no-resolve
+  - IP-CIDR,8.8.4.4/32,Proxy,no-resolve
+  - IP-CIDR,1.1.1.1/32,Proxy,no-resolve
+  - IP-CIDR,1.0.0.1/32,Proxy,no-resolve
+  - IP-CIDR,9.9.9.9/32,Proxy,no-resolve
+  - IP-CIDR,149.112.112.112/32,Proxy,no-resolve
+  - DOMAIN-SUFFIX,dns.google,Proxy
+  - DOMAIN,cloudflare-dns.com,Proxy
+  - RULE-SET,applications,DIRECT
+  - RULE-SET,private,DIRECT
+  - RULE-SET,lancidr,DIRECT,no-resolve
+  - GEOIP,LAN,DIRECT,no-resolve
+  - DOMAIN-SUFFIX,steampowered.com,Steam
+  - DOMAIN-SUFFIX,steamcommunity.com,Steam
+  - DOMAIN-SUFFIX,steamstatic.com,Steam
+  - DOMAIN-SUFFIX,steamusercontent.com,Steam
+  - DOMAIN-SUFFIX,steam-chat.com,Steam
+  - DOMAIN-SUFFIX,steamgames.com,Steam
+  - DOMAIN-SUFFIX,steam-api.com,Steam
+  - DOMAIN-SUFFIX,valvesoftware.com,Steam
+  - DOMAIN-KEYWORD,steamcdn,Steam
+  - DOMAIN-KEYWORD,steamcloud,Steam
+  - DOMAIN-KEYWORD,steamstore,Steam
+  - DOMAIN-KEYWORD,steamuserimages,Steam
+  - DOMAIN-KEYWORD,steamvideo,Steam
+  - DOMAIN-KEYWORD,steambroadcast,Steam
+  - RULE-SET,steam-cn,DIRECT
+  - DOMAIN-KEYWORD,steamcontent,DIRECT
+  - DOMAIN-KEYWORD,steampipe,DIRECT
+  - RULE-SET,steam,Steam
+  - RULE-SET,telegramcidr,Proxy,no-resolve
+  - RULE-SET,telegram,Proxy
+  - DOMAIN-SUFFIX,t.me,Proxy
+  - DOMAIN-SUFFIX,telegram.org,Proxy
+  - DOMAIN-SUFFIX,telegram.me,Proxy
+  - DOMAIN-SUFFIX,telegra.ph,Proxy
+  - DOMAIN-SUFFIX,telesco.pe,Proxy
+  - DOMAIN-SUFFIX,tdesktop.com,Proxy
+  - DOMAIN-KEYWORD,telegram,Proxy
+  - DOMAIN-SUFFIX,googleapis.cn,Google
+  - DOMAIN-SUFFIX,xn--ngstr-lra8j.com,Google
+  - DOMAIN,dl.google.com,Google
+  - DOMAIN,dl.l.google.com,Google
+  - DOMAIN,c.android.clients.google.com,Google
+  - DOMAIN,update.googleapis.com,Google
+  - DOMAIN,connectivitycheck.gstatic.com,Google
+  - DOMAIN,checkin.gstatic.com,Google
+  - DOMAIN-SUFFIX,gvt1.com,Google
+  - DOMAIN-SUFFIX,gvt2.com,Google
+  - DOMAIN-SUFFIX,gvt3.com,Google
+  - DOMAIN-SUFFIX,googleapis.com,Google
+  - DOMAIN-SUFFIX,googleusercontent.com,Google
+  - DOMAIN-SUFFIX,google.com,Google
+  - DOMAIN-SUFFIX,gstatic.com,Google
+  - DOMAIN-SUFFIX,ggpht.com,Google
+  - DOMAIN-SUFFIX,android.com,Google
+  - DOMAIN-SUFFIX,googleplay.com,Google
+  - DOMAIN-KEYWORD,googleplay,Google
+  - DOMAIN-SUFFIX,gemini.google,Google
+  - DOMAIN-SUFFIX,deepmind.google,Google
+  - DOMAIN-SUFFIX,labs.google,Google
+  - DOMAIN-SUFFIX,notebooklm.google,Google
+  - DOMAIN-SUFFIX,jules.google,Google
+  - DOMAIN-SUFFIX,antigravity.google,Google
+  - DOMAIN-SUFFIX,generativeai.google,Google
+  - DOMAIN-SUFFIX,ai.google.dev,Google
+  - RULE-SET,googlefcm,Google
+  - RULE-SET,google,Google
+  - DOMAIN-SUFFIX,anthropic.com,AI
+  - DOMAIN-SUFFIX,claude.ai,AI
+  - DOMAIN-SUFFIX,claude.com,AI
+  - DOMAIN-SUFFIX,claudeusercontent.com,AI
+  - DOMAIN-SUFFIX,openai.com,AI
+  - DOMAIN-SUFFIX,chatgpt.com,AI
+  - DOMAIN-SUFFIX,oaistatic.com,AI
+  - DOMAIN-SUFFIX,oaiusercontent.com,AI
+  - DOMAIN-SUFFIX,x.ai,AI
+  - IP-CIDR,160.79.104.0/21,AI,no-resolve
+  - RULE-SET,anthropic,AI
+  - RULE-SET,openai,AI
+  - RULE-SET,ai,AI
+  - RULE-SET,reject,REJECT
+  - RULE-SET,direct,DIRECT
+  - RULE-SET,proxy,Proxy
+  - RULE-SET,gfw,Proxy
+  - RULE-SET,cncidr,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,Final
