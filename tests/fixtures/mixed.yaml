@@ -1,0 +1,12 @@
+proxies:
+  - name: Osaka
+    type: trojan
+    server: 198.51.100.30
+    port: 443
+    password: example-password
+  - name: SkipMe
+    type: ss
+    server: 198.51.100.40
+    port: 8388
+    cipher: aes-128-gcm
+    password: example-password

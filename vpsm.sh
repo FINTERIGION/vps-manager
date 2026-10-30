@@ -13,6 +13,7 @@ unset _lib
 
 pause() { read -r -s -n 1 -p "Press any key to return..." _ && echo; }
 ask() { local v; read -r -p "$1" v; printf '%s\n' "$v"; }
+cls() { [[ -t 1 ]] && clear; }
 pick_user() {
     run_locked user_list >&2
     ask "${1:-Username: }"
@@ -21,7 +22,7 @@ pick_user() {
 firewall_menu() {
     local a p
     while true; do
-        clear
+        cls
         echo "=== iptables Inbound Rules ==="
         run_locked firewall_cmd status
         echo
@@ -48,7 +49,7 @@ firewall_menu() {
 swap_menu() {
     local a size
     while true; do
-        clear
+        cls
         echo "=== Swap ==="
         swap_status
         echo
@@ -69,7 +70,7 @@ swap_menu() {
 node_settings_menu() {
     local a value
     while true; do
-        clear
+        cls
         echo "=== Node Settings ==="
         show_node_info
         echo
@@ -102,7 +103,7 @@ node_settings_menu() {
 users_menu() {
     local a name quota
     while true; do
-        clear
+        cls
         echo "=== Users ==="
         run_locked user_list
         echo
@@ -140,28 +141,31 @@ users_menu() {
 }
 
 external_menu() {
-    local a name alias url
+    local a alias url filter
     while true; do
-        clear
+        cls
         echo "=== External Clash/Mihomo Subscriptions ==="
-        echo "1) List a user's subscriptions"
-        echo "2) Attach a subscription"
-        echo "3) Detach a subscription"
-        echo "4) Refresh one user's subscriptions"
+        run_locked extra_sub_list
+        echo
+        echo "1) Attach a subscription (shared by every user)"
+        echo "2) Detach a subscription"
+        echo "3) Change a subscription's node filter"
+        echo "4) Refresh one subscription"
         echo "5) Refresh all subscriptions"
         echo "0) Back"
         a=$(ask "Choose: ")
         case $a in
-            1) name=$(pick_user); [[ -n $name ]] && run_locked extra_sub_list "$name" ;;
-            2)
-                name=$(pick_user); alias=$(ask "Alias: "); url=$(ask "Clash/Mihomo URL: ")
-                [[ -n $name ]] && run_locked user_attach "$name" "$alias" "$url"
+            1)
+                alias=$(ask "Alias: "); url=$(ask "Clash/Mihomo URL: ")
+                filter=$(ask "Node filter regex (empty = all nodes): ")
+                run_locked extra_sub_attach "$alias" "$url" "$filter"
                 ;;
+            2) alias=$(ask "Alias: "); run_locked extra_sub_detach "$alias" ;;
             3)
-                name=$(pick_user); alias=$(ask "Alias: ")
-                [[ -n $name ]] && run_locked user_detach "$name" "$alias"
+                alias=$(ask "Alias: "); filter=$(ask "Filter regex (0 = clear): ")
+                run_locked extra_sub_set_filter "$alias" "$filter"
                 ;;
-            4) name=$(pick_user); [[ -n $name ]] && run_locked extra_sub_refresh "$name" force ;;
+            4) alias=$(ask "Alias: "); run_locked extra_sub_refresh "$alias" force ;;
             5) run_locked extra_sub_refresh all force ;;
             0 | "") return 0 ;;
             *) continue ;;
@@ -185,7 +189,7 @@ subscription_menu() {
 services_menu() {
     local a
     while true; do
-        clear
+        cls
         echo "=== Services ==="
         show_status
         echo
@@ -213,7 +217,7 @@ services_menu() {
 
 core_update_menu() {
     local a
-    clear
+    cls
     echo "=== Update Xray / Caddy ==="
     echo "1) Update Xray"
     echo "2) Update Caddy"
@@ -229,34 +233,63 @@ core_update_menu() {
     esac
 }
 
+menu_width() {
+    local line width=0
+    for line in "$@"; do
+        ((${#line} > width)) && width=${#line}
+    done
+    ((width < 50)) && width=50
+    printf '%s\n' "$width"
+}
+
+menu_center() {
+    local text=$1 width=$2 pad left right
+    pad=$((width - ${#text} - 2))
+    ((pad < 2)) && pad=2
+    left=$((pad / 2))
+    right=$((pad - left))
+    printf '%s %s %s\n' "$(printf '%*s' "$left" '' | tr ' ' '=')" "$text" \
+        "$(printf '%*s' "$right" '' | tr ' ' '=')"
+}
+
+menu_banner() { menu_center "vpsm $VPSM_VERSION" "$1"; }
+
 menu() {
-    local choice
+    local choice width
+    declare -a security=(
+        " 1) Change SSH port"
+        " 2) Manage iptables inbound rules"
+        " 3) Configure Swap"
+    )
+    declare -a node=(
+        " 4) Show node information"
+        " 5) Configure node settings"
+        " 6) Manage users"
+        " 7) Manage external subscriptions"
+        " 8) Show subscription links and QR codes"
+        " 9) Edit custom Clash rules"
+    )
+    declare -a system=(
+        "10) Service status and logs"
+        "11) Update Xray / Caddy"
+        "12) Update scripts"
+        "13) Update system kernel"
+        "14) Enable BBR"
+        "15) Sync traffic and status now"
+        "16) Uninstall vpsm"
+        " 0) Exit"
+    )
+    width=$(menu_width "${security[@]}" "${node[@]}" "${system[@]}")
     while true; do
-        clear
-        cat <<EOF
-==================== vpsm ====================
-=== Security ===
- 1) Change SSH port
- 2) Manage iptables inbound rules
- 3) Configure Swap
-=== Node ===
- 4) Show node information
- 5) Configure node settings
- 6) Manage users
- 7) Manage external subscriptions
- 8) Show subscription links and QR codes
- 9) Edit custom Clash rules
-=== System ===
-10) Service status and logs
-11) Update Xray / Caddy
-12) Update scripts
-13) Update system kernel
-14) Enable BBR
-15) Sync traffic and status now
-16) Uninstall vpsm
- 0) Exit
-=============================================
-EOF
+        cls
+        menu_banner "$width"
+        menu_center Security "$width"
+        printf '%s\n' "${security[@]}"
+        menu_center Node "$width"
+        printf '%s\n' "${node[@]}"
+        menu_center System "$width"
+        printf '%s\n' "${system[@]}"
+        printf '%s\n' "$(printf '%*s' "$width" '' | tr ' ' '=')"
         choice=$(ask "Choose: ")
         case $choice in
             1) choice=$(ask "New SSH port: "); run_locked ssh_change_port "$choice" ;;
@@ -304,7 +337,8 @@ sub_cmd() {
         url) shift; user_url "$@" ;;
         link) shift; user_sub "$@" ;;
         refresh) shift; extra_sub_refresh "${1:-all}" force ;;
-        "") err "Usage: vpsm sub <user> | vpsm sub [qr|url|name|refresh]" ;;
+        filter) shift; extra_sub_set_filter "$@" ;;
+        "") err "Usage: vpsm sub <user> | vpsm sub [qr|url|name|refresh|filter]" ;;
         *) user_sub "$1" ;;
     esac
 }
@@ -347,8 +381,9 @@ main() {
         enable) run_locked user_enable "$@" ;;
         disable) run_locked user_disable "$@" ;;
         token) run_locked user_token "$@" ;;
-        attach) run_locked user_attach "$@" ;;
-        detach) run_locked user_detach "$@" ;;
+        attach) run_locked extra_sub_attach "$@" ;;
+        detach) run_locked extra_sub_detach "$@" ;;
+        filter) run_locked extra_sub_set_filter "$@" ;;
         reset-day | resetday) run_locked set_reset_day "$@" ;;
         port) run_locked set_port "$@" ;;
         domain | sni) run_locked set_domain "$@" ;;

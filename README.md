@@ -7,7 +7,7 @@ It provides an interactive menu and direct subcommands for:
 - A dedicated iptables inbound whitelist and swap file management
 - One-command VLESS + Reality + Vision deployment
 - Per-user quotas, usage counters, and subscription links
-- Per-user external subscriptions with validated caching
+- Shared external subscriptions with regex node filters
 - Xray, Caddy, script, and distribution repository updates
 
 ## Installation

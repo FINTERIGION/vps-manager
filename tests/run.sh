@@ -127,6 +127,7 @@ assert_success "generated Clash YAML is valid after restoring rules" python3 -c 
 
 cat >"$TMP/stubs/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CURL_ARGS_LOG"
 out=""
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -140,42 +141,122 @@ EOF
 chmod 755 "$TMP/stubs/curl"
 export PATH="$TMP/stubs:$PATH"
 export FIXTURE="$PROJECT/tests/fixtures/valid.yaml"
-set_node_name "provider: Tokyo" >/dev/null 2>&1
-if ( user_attach alice provider https://subscriptions.example/clash.yaml ) >/dev/null 2>&1; then
+export CURL_ARGS_LOG="$TMP/curl.args"
+: >"$CURL_ARGS_LOG"
+set_node_name Tokyo >/dev/null 2>&1
+if ( extra_sub_attach provider https://subscriptions.example/clash.yaml ) >/dev/null 2>&1; then
     fail_test "conflicting external proxy names are rejected before attaching"
 else
     ok_test "conflicting external proxy names are rejected before attaching"
 fi
-assert_eq 0 "$(user_get alice '(.extra_subs // []) | length')" "failed attach leaves the database unchanged"
-[[ ! -e "$SUB_EXTRA/alice/provider.proxies.yaml" ]] &&
+assert_eq 0 "$(extra_sub_count)" "failed attach leaves the database unchanged"
+[[ ! -e "$SUB_EXTRA/provider.proxies.yaml" ]] &&
     ok_test "failed attach removes the cached subscription" || fail_test "failed attach removes the cached subscription"
 set_node_name 0 >/dev/null 2>&1
-user_attach alice provider https://subscriptions.example/clash.yaml
-assert_eq 1 "$(user_get alice '(.extra_subs // []) | length')" "external subscription is attached to one user"
-assert_eq 0 "$(user_get bob '(.extra_subs // []) | length')" "external subscription is not shared"
-assert_file_contains "$alice_yaml" "provider: Tokyo" "external proxy is merged with an alias"
-assert_file_contains "$alice_yaml" "provider: Quote" "quoted external proxy name is rendered"
-assert_file_not_contains "$bob_yaml" "provider: Tokyo" "other user's YAML excludes the external proxy"
+extra_sub_attach provider https://subscriptions.example/clash.yaml ""
+assert_file_contains "$CURL_ARGS_LOG" "-A clash-verge" "external fetch presents a Clash user agent"
+assert_eq 1 "$(extra_sub_count)" "external subscription is stored once"
+assert_eq 0 "$(db_get '.settings.extra_subs[0].filter | length')" "node filter defaults to empty"
+assert_file_contains "$alice_yaml" "name: Tokyo" "external proxy keeps its original name"
+assert_file_not_contains "$alice_yaml" "provider: Tokyo" "external proxy name is not prefixed with the alias"
+assert_file_contains "$bob_yaml" "name: Tokyo" "external subscription is shared by every user"
 assert_file_contains "$alice_yaml" "- MATCH,Final" "external rules are not imported"
 assert_success "merged Clash YAML remains valid" python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1], encoding="utf-8")); assert len(d["proxies"]) == 3; assert d["rules"][-1] == "MATCH,Final"' "$alice_yaml"
 
-cache="$SUB_EXTRA/alice/provider.proxies.yaml"
+export FIXTURE="$PROJECT/tests/fixtures/mixed.yaml"
+extra_sub_attach osaka https://subscriptions.example/mixed.yaml '^Osaka$'
+assert_eq 2 "$(extra_sub_count)" "a second shared subscription is attached with a filter"
+assert_file_contains "$SUB_EXTRA/osaka.names.yaml" "Osaka" "filter keeps the matching node"
+assert_file_not_contains "$SUB_EXTRA/osaka.names.yaml" "SkipMe" "filter drops the other nodes"
+assert_file_contains "$bob_yaml" "name: Osaka" "filtered nodes reach every user"
+export FIXTURE="$PROJECT/tests/fixtures/valid.yaml"
+if ( extra_sub_attach dupe https://subscriptions.example/dupe.yaml ) >/dev/null 2>&1; then
+    fail_test "duplicate node names across subscriptions are rejected"
+else
+    ok_test "duplicate node names across subscriptions are rejected"
+fi
+assert_eq 2 "$(extra_sub_count)" "failed duplicate attach keeps the shared list unchanged"
+[[ ! -e "$SUB_EXTRA/dupe.names.yaml" ]] &&
+    ok_test "failed duplicate attach removes its cache" || fail_test "failed duplicate attach removes its cache"
+
+extra_sub_set_filter provider '^Tokyo$'
+assert_eq '^Tokyo$' "$(db_get '.settings.extra_subs[] | select(.alias == "provider") | .filter')" "node filter is stored"
+list_output=$(extra_sub_list)
+[[ $list_output == *"provider"* && $list_output == *'^Tokyo$'* ]] &&
+    ok_test "subscription list shows every alias with its filter" || fail_test "subscription list shows every alias with its filter"
+assert_file_contains "$SUB_EXTRA/provider.names.yaml" "Tokyo" "refreshed filter keeps the matching node"
+assert_file_not_contains "$SUB_EXTRA/provider.names.yaml" "Quote" "refreshed filter drops the other nodes"
+before_filter=$(db_get '.settings.extra_subs[] | select(.alias == "provider") | .filter')
+if ( extra_sub_set_filter provider '(' ) >/dev/null 2>&1; then
+    fail_test "invalid filter regular expressions are rejected"
+else
+    ok_test "invalid filter regular expressions are rejected"
+fi
+assert_eq "$before_filter" "$(db_get '.settings.extra_subs[] | select(.alias == "provider") | .filter')" \
+    "a rejected filter leaves the previous filter"
+if ( extra_sub_set_filter provider '^Nope$' ) >/dev/null 2>&1; then
+    fail_test "a filter without matches is rejected"
+else
+    ok_test "a filter without matches is rejected"
+fi
+
+: >"$SUB_STAMP"
+touch -d '13 hours ago' "$SUB_EXTRA/provider.stamp"
+extra_sub_refresh all
+[[ ! -e $SUB_STAMP ]] && ok_test "a due refresh invalidates the full-render stamp" ||
+    fail_test "a due refresh invalidates the full-render stamp"
+sub_regen force
+
+cache="$SUB_EXTRA/provider.proxies.yaml"
 before=$(sha256sum "$cache" | awk '{print $1}')
-if CURL_STUB_FAIL=1 extra_sub_fetch alice provider https://subscriptions.example/clash.yaml force >/dev/null 2>&1; then
+if CURL_STUB_FAIL=1 extra_sub_refresh all force >/dev/null 2>&1; then
     fail_test "failed external refresh reports an error"
 else
     ok_test "failed external refresh reports an error"
 fi
 after=$(sha256sum "$cache" | awk '{print $1}')
 assert_eq "$before" "$after" "failed refresh keeps the last valid cache"
-user_detach alice provider
-assert_file_not_contains "$alice_yaml" "provider: Tokyo" "detaching regenerates the user's subscription"
-assert_eq 0 "$(user_get alice '(.extra_subs // []) | length')" "detach updates only the owning user"
+db_write '.settings.extra_subs |= map(if .alias == "osaka" then .filter = "" else . end)'
+if extra_sub_refresh all force >/dev/null 2>&1; then
+    fail_test "refresh reports regeneration failures"
+else
+    ok_test "refresh reports regeneration failures"
+fi
+assert_file_contains "$SUB_EXTRA/osaka.names.yaml" "Tokyo" "the failed refresh still updates its cache"
+assert_file_not_contains "$alice_yaml" "Quote" "a rejected regeneration leaves the subscriptions unchanged"
+extra_sub_detach provider
+extra_sub_detach osaka
+assert_eq 0 "$(extra_sub_count)" "detaching removes every shared subscription"
+assert_file_not_contains "$alice_yaml" "Tokyo" "detaching regenerates every user's subscription"
+assert_file_not_contains "$bob_yaml" "Osaka" "detaching removes the shared nodes from other users"
+
+db_write --arg u 'https://legacy.example/sub.yaml' \
+    '.users |= map(if .name == "alice" then .extra_subs = [{alias:"legacy",url:$u}] else . end)'
+db_write --arg u 'https://legacy.example/other.yaml' \
+    '.users |= map(if .name == "bob" then .extra_subs = [{alias:"legacy",url:$u}] else . end)'
+mkdir -p "$SUB_EXTRA/alice"
+cp "$PROJECT/tests/fixtures/mixed.yaml" "$SUB_EXTRA/alice/legacy.proxies.yaml"
+printf '      - Legacy\n' >"$SUB_EXTRA/alice/legacy.names.yaml"
+: >"$SUB_EXTRA/alice/legacy.stamp"
+migration_output=$(db_migrate 2>&1)
+assert_eq 1 "$(extra_sub_count)" "legacy per-user subscriptions become shared"
+[[ $migration_output == *"legacy"* ]] &&
+    ok_test "migration warns about aliases shared by several users" || fail_test "migration warns about aliases shared by several users"
+assert_eq https://legacy.example/sub.yaml "$(db_get '.settings.extra_subs[0].url')" "migrated subscription keeps its URL"
+assert_eq 0 "$(db_get '(.users[] | select(.name == "alice") | .extra_subs // []) | length')" \
+    "legacy per-user subscription fields are dropped"
+[[ -f $SUB_EXTRA/legacy.names.yaml && ! -d $SUB_EXTRA/alice ]] &&
+    ok_test "legacy per-user cache is moved to the shared layout" || fail_test "legacy per-user cache is moved to the shared layout"
+db_write '.settings.extra_subs = []'
+rm -f "$SUB_EXTRA/legacy".*.yaml "$SUB_EXTRA/legacy.stamp"
+sub_regen force
 
 assert_failure "malformed external YAML is rejected" python3 "$SH_DIR/src/extra_sub.py" normalize \
-    "$PROJECT/tests/fixtures/invalid.yaml" bad "$TMP/bad.proxies" "$TMP/bad.names"
+    "$PROJECT/tests/fixtures/invalid.yaml" "" "$TMP/bad.proxies" "$TMP/bad.names"
 assert_failure "duplicate external names are rejected" python3 "$SH_DIR/src/extra_sub.py" normalize \
-    "$PROJECT/tests/fixtures/duplicate.yaml" bad "$TMP/dup.proxies" "$TMP/dup.names"
+    "$PROJECT/tests/fixtures/duplicate.yaml" "" "$TMP/dup.proxies" "$TMP/dup.names"
+assert_failure "invalid filter regular expressions are rejected by the parser" python3 "$SH_DIR/src/extra_sub.py" check-filter "("
+assert_success "empty filters are accepted by the parser" python3 "$SH_DIR/src/extra_sub.py" check-filter ""
 printf '      - node.example.com\n' >"$TMP/conflict.names"
 assert_failure "local and external name conflicts are rejected" python3 "$SH_DIR/src/extra_sub.py" check-names \
     "$TMP/conflict.names" node.example.com
@@ -321,15 +402,27 @@ else
 fi
 help_output=$(bash "$PROJECT/vpsm.sh" help)
 [[ $help_output == *"single-node multi-user"* ]] && ok_test "English CLI help is available" || fail_test "English CLI help is available"
-assert_file_contains "$PROJECT/vpsm.sh" "=== Security ===" "fixed menu contains the security section"
-assert_file_contains "$PROJECT/vpsm.sh" "=== Node ===" "fixed menu contains the node section"
-assert_file_contains "$PROJECT/vpsm.sh" "=== System ===" "fixed menu contains the system section"
 menu_output=$(printf '0\n' | bash "$PROJECT/vpsm.sh" 2>/dev/null)
 if [[ $menu_output == *"1) Change SSH port"* && $menu_output == *"16) Uninstall vpsm"* ]]; then
     ok_test "interactive CLI renders the complete numeric panel"
 else
     fail_test "interactive CLI renders the complete numeric panel"
 fi
+if [[ $menu_output == *" Security "* && $menu_output == *" Node "* && $menu_output == *" System "* ]]; then
+    ok_test "fixed menu renders every category"
+else
+    fail_test "fixed menu renders every category"
+fi
+menu_section=$(printf '%s\n' "$menu_output" | grep -m1 ' Security ')
+menu_left=${menu_section%% Security*}
+menu_right=${menu_section##* Security }
+assert_eq "${#menu_left}" "${#menu_right}" "category titles are centered"
+menu_first=$(printf '%s\n' "$menu_output" | head -n 1)
+[[ $menu_first == *"vpsm $VPSM_VERSION"* ]] && ok_test "menu banner shows the script version" || fail_test "menu banner shows the script version"
+menu_panel_width=$(printf '%s\n' "$menu_output" | awk '{ if (length($0) > w) w = length($0) } END { print w }')
+assert_eq "$menu_panel_width" "${#menu_first}" "menu rules are as wide as the longest line"
+menu_bad_rules=$(printf '%s\n' "$menu_output" | awk -v w="$menu_panel_width" 'substr($0, 1, 3) == "===" { if (length($0) != w) c++ } END { print c + 0 }')
+assert_eq 0 "$menu_bad_rules" "every category rule spans the panel width"
 assert_file_contains "$PROJECT/README.md" "## Disclaimer" "README retains the disclaimer heading"
 assert_file_contains "$PROJECT/README.md" "The authors accept no liability for any misuse" "README retains the full disclaimer"
 

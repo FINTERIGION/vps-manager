@@ -303,7 +303,7 @@ Notes:
  2. Subscriptions use the Clash Meta / Mihomo format
  3. Traffic syncs every minute and resets on day $RESET_DAY
  4. Every user expires on ${EXPIRE:-never}; change it with: vpsm expire <date>
- 5. Attach per-user Clash subscriptions with: vpsm attach <user> <alias> <url>
+ 5. Attach shared Clash subscriptions with: vpsm attach <alias> <url> [filter]
  6. Firewall: $(fw_state_text)
 =======================================================
 EOF

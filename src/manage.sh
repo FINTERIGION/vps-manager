@@ -336,9 +336,10 @@ Subscriptions:
   sub <name>                        Show the user's Clash subscription URL
   sub qr|url <name>                 Show a QR code or single-node vless:// link
   sub name [name|0]                 Set the subscription profile name
-  sub refresh [user|all]            Refresh external subscriptions now
-  attach <user> <alias> <url>       Attach a Clash/Mihomo subscription to one user
-  detach <user> <alias>             Detach an external subscription
+  sub refresh [alias|all]           Refresh shared external subscriptions now
+  attach <alias> <url> [filter]     Attach a Clash/Mihomo subscription shared by every user
+  detach <alias>                    Detach a shared external subscription
+  filter <alias> <regex|0>          Filter a subscription's nodes by a regular expression
 
 Node:
   node [name|0]                     Show or set the local proxy name

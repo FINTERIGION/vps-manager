@@ -42,7 +42,7 @@ user_add() {
     db_write --arg name "$name" --arg uuid "$(gen_uuid)" --arg token "$(gen_hex 16)" \
         --argjson quota "$quota" \
         '.users += [{name:$name,uuid:$uuid,token:$token,quota:$quota,up:0,down:0,
-                     enabled:true,disabled_reason:"",extra_subs:[]}]'
+                     enabled:true,disabled_reason:""}]'
     if ! ( apply_state "$snap" force ); then
         db_restore "$db_snap" || warn "Failed to restore the database"
         db_rollback_runtime
@@ -55,27 +55,15 @@ user_add() {
 
 user_del() {
     require_user "${1:-}"
-    local snap db_snap cache cache_bak
+    local snap db_snap
     snap=$(state_snapshot)
     db_snap=$(db_snapshot) || err "Failed to back up the database"
-    cache=$(extra_dir "$1")
-    cache_bak=$(mktemp -d "$ROOT/.extra.bak.XXXXXX") || { rm -f "$db_snap"; err "Failed to back up user data"; }
-    if [[ -d $cache ]]; then
-        cp -a "$cache/." "$cache_bak/" ||
-            { rm -rf "$cache_bak"; rm -f "$db_snap"; err "Failed to back up user data"; }
-    fi
     db_write --arg n "$1" '.users |= map(select(.name != $n))'
-    rm -rf "$cache"
     if ! ( apply_state "$snap" force ); then
         db_restore "$db_snap" || warn "Failed to restore the database"
-        rm -rf "$cache"
-        mkdir -p "$cache"
-        cp -a "$cache_bak/." "$cache/" 2>/dev/null || true
-        rm -rf "$cache_bak"
         db_rollback_runtime
         err "User $1 was not deleted"
     fi
-    rm -rf "$cache_bak"
     rm -f "$db_snap"
     ok "User $1 deleted"
 }
@@ -135,7 +123,7 @@ user_info() {
     fi
     echo "Expires:        ${expire:-never}"
     echo "Next reset:     $(next_reset_date)"
-    echo "Subscriptions:  $(user_get "$n" '(.extra_subs // []) | length') external"
+    echo "External subs:  $(extra_sub_count) shared by every user"
     echo "Subscription:   $(sub_url "$n")"
     echo "Share link:     $(vless_share_url "$n")"
 }

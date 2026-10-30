@@ -113,6 +113,11 @@ sub_regen() {
     if [[ -n $full ]]; then
         mkdir -p "$stage/sub" "$stage/ex"
         sub_server_rules >"$stage/ex/server-rules"
+        if ! extra_sub_stage "$stage/ex"; then
+            rm -rf "$stage"
+            warn "External proxy names are invalid; subscriptions were not changed"
+            return 1
+        fi
     fi
 
     while IFS='|' read -r name uuid token quota up down; do
@@ -126,14 +131,8 @@ sub_regen() {
             >"$stage/users/$name.conf" ||
             { rm -rf "$stage"; warn "Failed to render the subscription info for $name"; return 1; }
         [[ -n $full ]] || continue
-        mkdir -p "$stage/ex/$name"
-        if ! extra_sub_stage_user "$name" "$stage/ex/$name"; then
-            rm -rf "$stage"
-            warn "External proxy names for user $name are invalid; subscriptions were not changed"
-            return 1
-        fi
         sub_render_clash "$name" "$uuid" "$stage/ex/server-rules" \
-            "$stage/ex/$name/proxies" "$stage/ex/$name/names" >"$stage/sub/$token.yaml" ||
+            "$stage/ex/proxies" "$stage/ex/names" >"$stage/sub/$token.yaml" ||
             { rm -rf "$stage"; warn "Failed to render the subscription for $name"; return 1; }
     done < <(jq -r '.users[] | select(.disabled_reason != "manual")
         | "\(.name)|\(.uuid)|\(.token)|\(.quota)|\(.up)|\(.down)"' "$DB")

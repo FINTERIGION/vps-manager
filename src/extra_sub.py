@@ -2,12 +2,15 @@
 """Validate and render untrusted Clash/Mihomo subscription proxies."""
 
 import math
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 import yaml
 
 MAX_PROXIES = 500
+MAX_FILTER_LENGTH = 200
 ALLOWED_TYPES = {
     "anytls",
     "http",
@@ -84,41 +87,60 @@ def load_document(path):
     return document["proxies"]
 
 
-def normalize(source, alias):
+def compile_filter(pattern):
+    """Compile the user-supplied node filter; an empty pattern keeps every node."""
+    if not pattern:
+        return None
+    if len(pattern) > MAX_FILTER_LENGTH:
+        fail(f"the filter is longer than {MAX_FILTER_LENGTH} characters")
+    if any(ord(char) < 32 or ord(char) == 127 for char in pattern):
+        fail("the filter contains control characters")
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        fail(f"invalid filter regular expression: {exc}")
+
+
+def normalize(source, pattern=""):
     proxies = load_document(source)
+    matcher = compile_filter(pattern)
     normalized = []
     names = set()
     for index, proxy in enumerate(proxies):
         if not isinstance(proxy, dict):
             fail(f"proxy {index + 1} is not a mapping")
-        validate_value(proxy, f"proxy {index + 1}")
         name = proxy.get("name")
-        proxy_type = proxy.get("type")
-        server = proxy.get("server")
-        port = proxy.get("port")
         if not isinstance(name, str) or not name.strip() or len(name) > 128:
             fail(f"proxy {index + 1} has an invalid name")
         if any(ord(char) < 32 or ord(char) == 127 for char in name):
             fail(f"proxy {index + 1} has control characters in its name")
+        name = name.strip()
+        if matcher is not None and not matcher.search(name):
+            continue
+        validate_value(proxy, f"proxy {index + 1}")
+        proxy_type = proxy.get("type")
+        server = proxy.get("server")
+        port = proxy.get("port")
         if not isinstance(proxy_type, str) or proxy_type.lower() not in ALLOWED_TYPES:
             fail(f"proxy {name!r} has an unsupported type")
         if not isinstance(server, str) or not server.strip():
             fail(f"proxy {name!r} has an invalid server")
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             fail(f"proxy {name!r} has an invalid port")
-        display_name = f"{alias}: {name.strip()}"
-        if display_name in names or display_name in RESERVED_NAMES:
-            fail(f"duplicate or reserved proxy name: {display_name}")
-        names.add(display_name)
+        if name in names or name in RESERVED_NAMES:
+            fail(f"duplicate or reserved proxy name: {name}")
+        names.add(name)
         item = dict(proxy)
-        item["name"] = display_name
+        item["name"] = name
         item["type"] = proxy_type.lower()
         normalized.append(item)
+    if matcher is not None and not normalized:
+        fail("the filter matched no proxies")
     return normalized
 
 
-def write_normalized(source, alias, proxies_output, names_output):
-    proxies = normalize(source, alias)
+def write_normalized(source, pattern, proxies_output, names_output):
+    proxies = normalize(source, pattern)
     proxy_text = yaml.safe_dump(
         proxies,
         allow_unicode=True,
@@ -142,7 +164,7 @@ def write_normalized(source, alias, proxies_output, names_output):
     Path(names_output).write_text("\n".join(name_lines) + "\n", encoding="utf-8")
 
 
-def check_names(path, local_name):
+def load_names(path):
     try:
         with Path(path).open("r", encoding="utf-8") as handle:
             names = yaml.safe_load(handle) or []
@@ -150,8 +172,14 @@ def check_names(path, local_name):
         fail(f"cannot read normalized proxy names: {exc}")
     if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
         fail("normalized proxy names are invalid")
-    if len(names) != len(set(names)):
-        fail("external subscriptions contain duplicate proxy names")
+    return names
+
+
+def check_names(path, local_name):
+    names = load_names(path)
+    duplicates = [name for name, count in Counter(names).items() if count > 1]
+    if duplicates:
+        fail(f"duplicate proxy names across subscriptions: {duplicates[0]!r}")
     if local_name in names:
         fail(f"the local node name conflicts with an external proxy: {local_name}")
     if any(name in RESERVED_NAMES for name in names):
@@ -161,11 +189,16 @@ def check_names(path, local_name):
 def main():
     try:
         if len(sys.argv) == 6 and sys.argv[1] == "normalize":
-            write_normalized(*sys.argv[2:6])
+            write_normalized(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
         elif len(sys.argv) == 4 and sys.argv[1] == "check-names":
             check_names(sys.argv[2], sys.argv[3])
+        elif len(sys.argv) == 3 and sys.argv[1] == "check-filter":
+            compile_filter(sys.argv[2])
         else:
-            fail("usage: extra_sub.py normalize <input> <alias> <proxies> <names> | check-names <names> <local>")
+            fail(
+                "usage: extra_sub.py normalize <input> <filter> <proxies> <names>"
+                " | check-names <names> <local> | check-filter <regex>"
+            )
     except SubscriptionError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

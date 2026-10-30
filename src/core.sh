@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.0.0"
+VPSM_VERSION="1.1.0"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -27,6 +27,7 @@ SUB_STAMP="$ROOT/.sub_stamp"
 SUB_RELOAD_PENDING="$ROOT/.sub_reload_pending"
 SUB_REFRESH=1800
 EXTRA_REFRESH=43200
+EXTRA_UA=${VPSM_EXTRA_UA:-clash-verge/v2.0.0 mihomo/1.18.0}
 
 API_PORT=10085
 API_ADDR="127.0.0.1:$API_PORT"
@@ -140,7 +141,7 @@ db_init() {
         jq -n --arg domain "$1" --argjson port "$2" --arg priv "$3" --arg pub "$4" \
             --arg sid "$5" --argjson rd "$6" --arg lr "$(calc_last_reset "$6")" --arg expire "$7" \
             '{settings:{domain:$domain,port:$port,private_key:$priv,public_key:$pub,
-              short_ids:[$sid],reset_day:$rd,last_reset:$lr,expire:$expire},users:[]}' >"$DB.new" &&
+              short_ids:[$sid],reset_day:$rd,last_reset:$lr,expire:$expire,extra_subs:[]},users:[]}' >"$DB.new" &&
             mv -f "$DB.new" "$DB"
     ) || { rm -f "$DB.new"; err "Failed to create $DB"; }
 }
@@ -149,9 +150,13 @@ need_installed() { [[ -f $DB ]] || err "$DB not found, please run install.sh fir
 
 db_migrate() {
     [[ -f $DB ]] || return 0
+    if declare -F extra_sub_migrate >/dev/null; then
+        extra_sub_migrate || warn "Failed to migrate the old external subscription data"
+    fi
     db_write 'if (.settings.expire // null) == null then .settings.expire = (.users[0].expire // "") else . end
+        | .settings.extra_subs = (.settings.extra_subs // [])
         | del(.settings.ssh_port)
-        | .users |= map(del(.expire, .sources) | .extra_subs = (.extra_subs // []))'
+        | .users |= map(del(.expire, .sources, .extra_subs))'
 }
 
 user_exists() { jq -e --arg n "$1" '.users[]|select(.name==$n)' "$DB" >/dev/null 2>&1; }
