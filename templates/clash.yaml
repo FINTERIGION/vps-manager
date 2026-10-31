@@ -94,7 +94,7 @@ proxies:
     reality-opts:
       public-key: __PBK__
       short-id: __SID__
-      support-x25519mlkem768: true
+      support-x25519mlkem768: __MLKEM__
   # __EXTRA_PROXIES__
 
 proxy-groups:

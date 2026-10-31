@@ -125,6 +125,26 @@ fi
 sub_regen force
 assert_success "generated Clash YAML is valid after restoring rules" python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))' "$alice_yaml"
 
+mkdir -p "$BIN_DIR"
+printf 'v26.9.7\n' >"$BIN_DIR/xray.version"
+sub_regen force
+assert_file_contains "$alice_yaml" "support-x25519mlkem768: false" "legacy Xray keeps ML-KEM out of the subscription"
+if vless_share_url alice | grep -qF -- "support-x25519mlkem768"; then
+    fail_test "legacy Xray keeps ML-KEM out of the share link"
+else
+    ok_test "legacy Xray keeps ML-KEM out of the share link"
+fi
+printf 'v26.9.8\n' >"$BIN_DIR/xray.version"
+sub_regen force
+assert_file_contains "$alice_yaml" "support-x25519mlkem768: true" "new Xray enables ML-KEM in the subscription"
+if vless_share_url alice | grep -qF -- "support-x25519mlkem768=true"; then
+    ok_test "new Xray enables ML-KEM in the share link"
+else
+    fail_test "new Xray enables ML-KEM in the share link"
+fi
+rm -f "$BIN_DIR/xray.version"
+sub_regen force
+
 cat >"$TMP/stubs/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$CURL_ARGS_LOG"

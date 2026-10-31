@@ -134,10 +134,12 @@ user_sub() {
 }
 
 vless_share_url() {
-    local domain port
+    local domain port url
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
-    echo "vless://$(user_get "$1" '.uuid')@$domain:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain&fp=chrome&pbk=$(db_get '.settings.public_key')&sid=$(db_get '.settings.short_ids[0]')&type=tcp&support-x25519mlkem768=true#$(urlencode "$(local_proxy_name)")"
+    url="vless://$(user_get "$1" '.uuid')@$domain:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain&fp=chrome&pbk=$(db_get '.settings.public_key')&sid=$(db_get '.settings.short_ids[0]')&type=tcp"
+    xray_mlkem_ok && url+="&support-x25519mlkem768=true"
+    printf '%s#%s\n' "$url" "$(urlencode "$(local_proxy_name)")"
 }
 
 user_url() {

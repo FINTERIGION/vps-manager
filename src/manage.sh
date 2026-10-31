@@ -145,6 +145,9 @@ update_core() {
     new=$(cat "$BIN_DIR/xray.version")
     if (xray_gen_config) && xray_restart force && svc_settled "$XRAY_SVC"; then
         bin_drop_backup "${files[@]}"
+        # REALITY ML-KEM support follows the installed Xray version, so refresh
+        # subscriptions right away instead of waiting for the periodic rebuild.
+        sub_regen force || warn "Subscriptions were not regenerated, run: vpsm regen"
         ok "Xray updated to $new"
         return 0
     fi

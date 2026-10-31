@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 # vpsm - Xray config generation and runtime user management
 
+xray_version() {
+    local v
+    v=$("$XRAY_BIN" version 2>/dev/null | awk 'NR == 1 {print $2}')
+    [[ -n $v ]] || v=$(cat "$BIN_DIR/xray.version" 2>/dev/null)
+    printf '%s\n' "${v#v}"
+}
+
+# Xray v26.9.8+ treats a REALITY ClientHello without an X25519MLKEM768 key
+# share as a probe and forwards it to the fallback target, which clients see
+# as a timeout. Older releases break on the post-quantum share instead.
+xray_mlkem_ok() {
+    local v major minor patch
+    v=$(xray_version)
+    [[ $v =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]] || return 0
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    patch=${BASH_REMATCH[3]}
+    ((major > 26)) && return 0
+    ((major == 26 && minor > 9)) && return 0
+    ((major == 26 && minor == 9 && patch >= 8)) && return 0
+    return 1
+}
+
 self_ips() {
     { ip -o addr show scope global 2>/dev/null || true; } |
         awk '!/ temporary/ {sub(/\/.*/, "", $4); print $4}' | sort -u | jq -Rnc '[inputs]'

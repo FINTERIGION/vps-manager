@@ -25,14 +25,15 @@ sub_server_rules() {
 }
 
 sub_render_clash() {
-    local name=$1 uuid=$2 sf=$3 ef=${4:-} nf=${5:-} domain port pbk sid node
+    local name=$1 uuid=$2 sf=$3 ef=${4:-} nf=${5:-} domain port pbk sid node mlkem
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
     pbk=$(db_get '.settings.public_key')
     sid=$(db_get '.settings.short_ids[0]')
     node=$(local_proxy_name)
+    if xray_mlkem_ok; then mlkem=true; else mlkem=false; fi
     awk -v node="$node" -v server="$domain" -v port="$port" -v uuid="$uuid" \
-        -v pbk="$pbk" -v sid="$sid" -v sni="$domain" -v user="$name" \
+        -v pbk="$pbk" -v sid="$sid" -v sni="$domain" -v user="$name" -v mlkem="$mlkem" \
         -v cf="$CUSTOM_RULES" -v sf="$sf" -v ef="$ef" -v nf="$nf" '
         function rep(s, k, v,   i, out) {
             out = ""
@@ -65,6 +66,7 @@ sub_render_clash() {
             $0 = rep($0, "__PORT__", port); $0 = rep($0, "__UUID__", uuid)
             $0 = rep($0, "__PBK__", pbk); $0 = rep($0, "__SID__", sid)
             $0 = rep($0, "__SNI__", sni); $0 = rep($0, "__USER__", user)
+            $0 = rep($0, "__MLKEM__", mlkem)
             print
         }' "$SH_DIR/templates/clash.yaml"
 }
