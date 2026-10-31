@@ -126,7 +126,7 @@ sub_regen force
 assert_success "generated Clash YAML is valid after restoring rules" python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))' "$alice_yaml"
 
 mkdir -p "$BIN_DIR"
-printf 'v26.9.7\n' >"$BIN_DIR/xray.version"
+printf 'v26.7.28\n' >"$BIN_DIR/xray.version"
 sub_regen force
 assert_file_contains "$alice_yaml" "support-x25519mlkem768: false" "legacy Xray keeps ML-KEM out of the subscription"
 if vless_share_url alice | grep -qF -- "support-x25519mlkem768"; then
@@ -134,7 +134,7 @@ if vless_share_url alice | grep -qF -- "support-x25519mlkem768"; then
 else
     ok_test "legacy Xray keeps ML-KEM out of the share link"
 fi
-printf 'v26.9.8\n' >"$BIN_DIR/xray.version"
+printf 'v26.9.9\n' >"$BIN_DIR/xray.version"
 sub_regen force
 assert_file_contains "$alice_yaml" "support-x25519mlkem768: true" "new Xray enables ML-KEM in the subscription"
 if vless_share_url alice | grep -qF -- "support-x25519mlkem768=true"; then
@@ -144,6 +144,22 @@ else
 fi
 rm -f "$BIN_DIR/xray.version"
 sub_regen force
+
+assert_eq "v26.7.28" "$(normalize_tag 26.7.28)" "a bare version gets the v prefix"
+assert_eq "v26.7.28" "$(normalize_tag V26.7.28)" "an upper-case prefix is normalized"
+github_latest() { printf 'v9.9.9\n'; }
+tag_exists() { [[ $2 == v9.9.9 ]]; }
+assert_eq "v9.9.9" "$(update_target_tag XTLS/Xray-core "$BIN_DIR/xray.version" 9.9.9)" \
+    "an existing tag is accepted and normalized"
+if ( update_target_tag XTLS/Xray-core "$BIN_DIR/xray.version" v0.0.0 ) >/dev/null 2>&1; then
+    fail_test "an unknown tag is rejected"
+else
+    ok_test "an unknown tag is rejected"
+fi
+printf 'v9.9.9\n' >"$BIN_DIR/xray.version"
+assert_eq "" "$(update_target_tag XTLS/Xray-core "$BIN_DIR/xray.version")" \
+    "an already installed release is not downloaded again"
+rm -f "$BIN_DIR/xray.version"
 
 cat >"$TMP/stubs/curl" <<'EOF'
 #!/usr/bin/env bash

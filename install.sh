@@ -306,6 +306,6 @@ Notes:
  5. Attach shared Clash subscriptions with: vpsm attach <alias> <url> [filter]
  6. Firewall: $(fw_state_text)
  7. Shadowrocket lacks REALITY ML-KEM support: use a Mihomo client, or run
-    vpsm update xray v26.9.7 for older-client compatibility
+    vpsm update xray v26.7.28 for older-client compatibility
 =======================================================
 EOF

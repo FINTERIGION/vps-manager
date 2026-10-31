@@ -126,12 +126,30 @@ show_log() {
     esac
 }
 
+normalize_tag() {
+    local tag=${1#[Vv]}
+    printf 'v%s\n' "$tag"
+}
+
+tag_exists() {
+    curl -fsSLI --connect-timeout 10 --max-time 20 -o /dev/null \
+        "https://github.com/$1/releases/tag/$2" >/dev/null 2>&1
+}
+
 update_target_tag() {
-    local tag=${3:-}
-    [[ -n $tag ]] && { echo "$tag"; return 0; }
-    tag=$(github_latest "$1")
-    [[ -n $tag ]] || err "Failed to get the latest version of $1"
-    [[ $tag == "$(cat "$2" 2>/dev/null)" ]] || echo "$tag"
+    local repo=$1 file=$2 tag=${3:-} latest
+    if [[ -n $tag ]]; then
+        tag=$(normalize_tag "$tag")
+        if ! tag_exists "$repo" "$tag"; then
+            latest=$(github_latest "$repo")
+            err "Version $tag does not exist in $repo${latest:+ (latest: $latest)}"
+        fi
+        printf '%s\n' "$tag"
+        return 0
+    fi
+    tag=$(github_latest "$repo")
+    [[ -n $tag ]] || err "Failed to get the latest version of $repo"
+    [[ $tag == "$(cat "$file" 2>/dev/null)" ]] || printf '%s\n' "$tag"
 }
 
 update_core() {

@@ -8,9 +8,10 @@ xray_version() {
     printf '%s\n' "${v#v}"
 }
 
-# Xray v26.9.8+ treats a REALITY ClientHello without an X25519MLKEM768 key
-# share as a probe and forwards it to the fallback target, which clients see
-# as a timeout. Older releases break on the post-quantum share instead.
+# Xray v26.9.9+ (the check arrived in the withdrawn v26.9.8) treats a REALITY
+# ClientHello without an X25519MLKEM768 key share as a probe and forwards it to
+# the fallback target, which clients see as a timeout. Older releases break on
+# the post-quantum share instead.
 xray_mlkem_ok() {
     local v major minor patch
     v=$(xray_version)

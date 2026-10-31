@@ -25,7 +25,7 @@ After installation, run `vpsm` to open the menu.
 To keep using Shadowrocket, downgrade the server to a release before v26.9.8:
 
 ```bash
-vpsm update xray v26.9.7
+vpsm update xray v26.7.28
 vpsm regen
 ```
 
