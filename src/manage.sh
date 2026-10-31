@@ -209,12 +209,24 @@ update_sh() {
     fi
     [[ -f $tmp/vpsm.sh && -d $tmp/src && -d $tmp/templates && -d $tmp/systemd ]] ||
         { rm -rf "$tmp"; err "Downloaded content is incomplete"; }
+    local _f
+    for _f in "$tmp"/vpsm.sh "$tmp"/install.sh "$tmp"/src/*.sh; do
+        [[ -f $_f ]] || continue
+        bash -n "$_f" 2>/dev/null || { rm -rf "$tmp"; err "Downloaded script ${_f##*/} has syntax errors, update aborted"; }
+    done
+    for _f in "$tmp"/src/*.py; do
+        [[ -f $_f ]] || continue
+        python3 -m py_compile "$_f" 2>/dev/null || { rm -rf "$tmp"; err "Downloaded Python script ${_f##*/} has syntax errors, update aborted"; }
+    done
     new="$ROOT/sh.new"
     rm -rf "$new"
     mkdir -p "$new"
     cp -r "$tmp/vpsm.sh" "$tmp/src" "$tmp/templates" "$tmp/systemd" "$new/" ||
         { rm -rf "$new" "$tmp"; err "Failed to stage new scripts"; }
     chmod 755 "$new/vpsm.sh"
+    find "$new" -type f -exec chmod 644 {} + 2>/dev/null || true
+    chmod 755 "$new/vpsm.sh" "$new"/src/*.sh 2>/dev/null || true
+    chmod 755 "$new"/src/*.py 2>/dev/null || true
     rm -rf "$tmp" "$ROOT/sh.old"
     mv "$ROOT/sh" "$ROOT/sh.old" || { rm -rf "$new"; err "Failed to replace scripts"; }
     if ! mv "$new" "$ROOT/sh"; then
@@ -268,22 +280,22 @@ update_kernel() {
     else
         err "Unsupported package manager; use your distribution's standard kernel update procedure"
     fi
-    msg "Kernel and system packages will be updated from the configured distribution repositories. No reboot will be performed."
+    msg "System packages and kernel will be updated safely from configured repositories without removing existing packages. No reboot will be performed."
     if [[ $yes != -y && $yes != --yes && -t 0 ]]; then
-        read -r -p "Continue with the distribution kernel update? [y/N] " ans
+        read -r -p "Continue with the package and kernel update? [y/N] " ans
         [[ $ans == y || $ans == Y ]] || { msg "Cancelled"; return 0; }
     fi
-    [[ -n ${VPSM_NO_SERVICE:-} ]] && { msg "(dry run, skipped) update kernel using $pm"; return 0; }
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && { msg "(dry run, skipped) update packages and kernel using $pm"; return 0; }
     case $pm in
         apt)
             apt-get update || err "Failed to refresh package indexes"
-            DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -o Dpkg::Options::=--force-confold ||
-                err "Distribution kernel update failed"
+            DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::=--force-confold ||
+                err "Package and kernel update failed"
             ;;
-        dnf) dnf upgrade -y || err "Distribution kernel update failed" ;;
-        yum) yum update -y || err "Distribution kernel update failed" ;;
+        dnf) dnf upgrade -y --nobest || dnf upgrade -y || err "Package and kernel update failed" ;;
+        yum) yum update -y || err "Package and kernel update failed" ;;
     esac
-    ok "Distribution packages updated successfully"
+    ok "Distribution packages and kernel updated successfully"
     if [[ -f /var/run/reboot-required ]]; then
         warn "A reboot is required to use the new kernel. Reboot manually after verifying your out-of-band access"
     else
@@ -380,7 +392,7 @@ System:
   start|stop|restart [xray|caddy|all]
   log [xray|caddy|sync]
   update [core|caddy|sh|all]        Update components and scripts, not the kernel
-  kernel [-y]                       Update distribution packages without rebooting
+  kernel [-y]                       Update system packages and kernel safely
   bbr                               Enable BBR
   uninstall [-y]
   version | help

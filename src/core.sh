@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.1.2"
+VPSM_VERSION="1.1.3"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -372,6 +372,7 @@ fix_perms() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
     [[ -f $XRAY_CONF ]] && chown root:root "$XRAY_CONF" && chmod 600 "$XRAY_CONF"
     [[ -f $DB ]] && chmod 600 "$DB"
+    [[ -f $ROOT/repo ]] && chmod 600 "$ROOT/repo"
     if [[ -d $SUB_EXTRA ]]; then
         chown root:root "$SUB_EXTRA"
         chmod 700 "$SUB_EXTRA"

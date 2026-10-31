@@ -409,6 +409,8 @@ set_key() {
             read -r key
         fi
         [[ -n $key ]] || err "No private key given"
+    elif [[ -n $key ]]; then
+        warn "Passing private keys directly as CLI arguments may expose them in process lists and shell history. Prefer 'vpsm key -' for interactive input."
     fi
     if [[ -n $key ]]; then
         pair=$(gen_x25519 -i "$key") || err "Invalid private key"

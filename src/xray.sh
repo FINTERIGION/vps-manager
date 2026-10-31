@@ -65,6 +65,7 @@ xray_gen_config() {
           ],
           routing: {domainStrategy: "IPIfNonMatch", rules: [
             {type: "field", inboundTag: ["api"], outboundTag: "api"},
+            {type: "field", inboundTag: [$tag], port: "\($apiport)", outboundTag: "block"},
             {type: "field", protocol: ["bittorrent"], outboundTag: "block"},
             {type: "field", port: "25", outboundTag: "block"},
             {type: "field", ip: (["geoip:private", "geoip:cn"] + $selfips), outboundTag: "block"}

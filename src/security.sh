@@ -268,6 +268,7 @@ swap_set() {
     ((avail > bytes + 104857600)) || err "Insufficient disk space for $(fmt_size "$bytes") plus a safety reserve"
 
     rm -f "$SWAP_FILE.new"
+    ( umask 077 && touch "$SWAP_FILE.new" && chmod 600 "$SWAP_FILE.new" ) || { rm -f "$SWAP_FILE.new"; err "Failed to create swap file"; }
     fallocate -l "$bytes" "$SWAP_FILE.new" || { rm -f "$SWAP_FILE.new"; err "Failed to allocate swap file"; }
     chmod 600 "$SWAP_FILE.new"
     mkswap "$SWAP_FILE.new" >/dev/null || { rm -f "$SWAP_FILE.new"; err "Failed to format swap file"; }

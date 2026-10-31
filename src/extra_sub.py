@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Validate and render untrusted Clash/Mihomo subscription proxies."""
 
+import ipaddress
 import math
 import re
+import socket
 import sys
+import urllib.parse
 from collections import Counter
 from pathlib import Path
 
@@ -11,6 +14,11 @@ import yaml
 
 MAX_PROXIES = 500
 MAX_FILTER_LENGTH = 200
+DISALLOWED_PROXY_KEYS = {"plugin", "plugin-opts", "dialer-proxy"}
+DANGEROUS_REGEX_PATTERNS = [
+    re.compile(r"(\+|\*|\{[0-9,]+\})\s*(\+|\*|\{[0-9,]+\})"),
+    re.compile(r"\([^)]*(\+|\*|\{[0-9,]+\})[^)]*\)\s*(\+|\*|\{[0-9,]+\})"),
+]
 ALLOWED_TYPES = {
     "anytls",
     "http",
@@ -50,6 +58,48 @@ class SubscriptionError(ValueError):
 
 def fail(message):
     raise SubscriptionError(message)
+
+
+def is_forbidden_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_unspecified
+            or ip.is_multicast
+        )
+    except ValueError:
+        return False
+
+
+def check_url(url):
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception as exc:
+        fail(f"malformed URL: {exc}")
+    if parsed.scheme.lower() not in ("http", "https"):
+        fail("only HTTP and HTTPS URLs are supported")
+    host = parsed.hostname
+    if not host:
+        fail("subscription URL missing host")
+    host_lower = host.lower()
+    if host_lower in ("localhost", "0.0.0.0", "::") or host_lower.endswith(
+        (".localhost", ".local", ".internal")
+    ):
+        fail("subscription URL cannot point to localhost or local network")
+    if is_forbidden_ip(host_lower):
+        fail("subscription URL cannot point to private, loopback, or cloud metadata IP addresses")
+    try:
+        infos = socket.getaddrinfo(host, None)
+        for info in infos:
+            ip_str = info[4][0]
+            if is_forbidden_ip(ip_str):
+                fail(f"subscription URL resolves to forbidden address: {ip_str}")
+    except (socket.gaierror, OSError):
+        pass
 
 
 def validate_value(value, path="proxy"):
@@ -95,6 +145,8 @@ def compile_filter(pattern):
         fail(f"the filter is longer than {MAX_FILTER_LENGTH} characters")
     if any(ord(char) < 32 or ord(char) == 127 for char in pattern):
         fail("the filter contains control characters")
+    if any(p.search(pattern) for p in DANGEROUS_REGEX_PATTERNS):
+        fail("the filter contains potential catastrophic backtracking regular expression")
     try:
         return re.compile(pattern)
     except re.error as exc:
@@ -118,6 +170,9 @@ def normalize(source, pattern=""):
         if matcher is not None and not matcher.search(name):
             continue
         validate_value(proxy, f"proxy {index + 1}")
+        for key in proxy:
+            if key.lower() in DISALLOWED_PROXY_KEYS:
+                fail(f"proxy {name!r} contains disallowed option: {key}")
         proxy_type = proxy.get("type")
         server = proxy.get("server")
         port = proxy.get("port")
@@ -194,10 +249,12 @@ def main():
             check_names(sys.argv[2], sys.argv[3])
         elif len(sys.argv) == 3 and sys.argv[1] == "check-filter":
             compile_filter(sys.argv[2])
+        elif len(sys.argv) == 3 and sys.argv[1] == "check-url":
+            check_url(sys.argv[2])
         else:
             fail(
                 "usage: extra_sub.py normalize <input> <filter> <proxies> <names>"
-                " | check-names <names> <local> | check-filter <regex>"
+                " | check-names <names> <local> | check-filter <regex> | check-url <url>"
             )
     except SubscriptionError as exc:
         print(f"Error: {exc}", file=sys.stderr)

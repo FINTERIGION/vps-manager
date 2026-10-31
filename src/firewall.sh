@@ -124,10 +124,19 @@ fw_load() {
     local ipt=$1 chain=$2 hook=$3
     "$ipt-restore" --noflush || return 1
     "$ipt" -w -C "$hook" -j "$chain" 2>/dev/null || "$ipt" -w -I "$hook" 1 -j "$chain"
+    if [[ $hook == INPUT && $chain == "$FW_CHAIN" ]]; then
+        "$ipt" -w -L DOCKER-USER >/dev/null 2>&1 &&
+            { "$ipt" -w -C DOCKER-USER -j "$chain" 2>/dev/null || "$ipt" -w -I DOCKER-USER 1 -j "$chain"; }
+    fi
+    return 0
 }
 fw_unload() {
     local ipt=$1 chain=$2 hook=$3
     cmd_exists "$ipt" || return 0
+    if [[ $hook == INPUT && $chain == "$FW_CHAIN" ]]; then
+        "$ipt" -w -L DOCKER-USER >/dev/null 2>&1 &&
+            while "$ipt" -w -D DOCKER-USER -j "$chain" 2>/dev/null; do :; done
+    fi
     while "$ipt" -w -D "$hook" -j "$chain" 2>/dev/null; do :; done
     "$ipt" -w -F "$chain" 2>/dev/null
     "$ipt" -w -X "$chain" 2>/dev/null
@@ -304,7 +313,7 @@ firewall_cmd() {
         allow | add) fw_allow "$@" ;;
         deny | del | rm) fw_deny "$@" ;;
         reload | apply) fw_reload ;;
-        flush) fw_flush_all ;;
+        flush) fw_flush_input; ok "Inbound firewall flushed (Xray API guard remains active)" ;;
         *) err "Usage: vpsm firewall [status|on|off|allow <port>[/proto]|deny <port>[/proto]|reload]" ;;
     esac
 }

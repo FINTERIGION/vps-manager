@@ -97,6 +97,10 @@ assert_eq "$(date +%Y-%m)" "$(db_get '.settings.last_reset')" "monthly reset mar
 set_expire 2000-01-01
 assert_eq expired "$(user_get alice '.disabled_reason')" "global expiry disables first user"
 assert_eq expired "$(user_get bob '.disabled_reason')" "global expiry disables second user"
+[[ ! -f "$SUB_DIR/$(user_get alice '.token').yaml" ]] &&
+    ok_test "expired user cannot obtain subscription" || fail_test "expired user cannot obtain subscription"
+[[ ! -f "$CADDY_USERS/alice.conf" ]] &&
+    ok_test "expired user Caddy route is removed" || fail_test "expired user Caddy route is removed"
 set_expire 2099-12-31
 assert_eq "" "$(user_get alice '.disabled_reason')" "extending global expiry restores eligible users"
 
@@ -114,6 +118,16 @@ sub_regen
 assert_file_contains "$CADDY_USERS/alice.conf" "upload=12345" "subscription info refreshes without full regeneration"
 db_write '.users |= map(if .name == "alice" then .up = 0 else . end)'
 sub_regen
+
+db_write '.users |= map(if .name == "alice" then .up = 2147483648 else . end)'
+traffic_evaluate
+assert_eq quota "$(user_get alice '.disabled_reason')" "quota exceeded marks user quota-disabled"
+sub_regen force
+[[ -f "$alice_yaml" ]] &&
+    ok_test "quota-exceeded user can still obtain subscription" || fail_test "quota-exceeded user can still obtain subscription"
+db_write '.users |= map(if .name == "alice" then .up = 0 else . end)'
+traffic_evaluate
+sub_regen force
 
 printf '[\n' >"$CUSTOM_RULES"
 if sub_regen force >/dev/null 2>&1; then
@@ -189,6 +203,16 @@ assert_eq 0 "$(extra_sub_count)" "failed attach leaves the database unchanged"
 [[ ! -e "$SUB_EXTRA/provider.proxies.yaml" ]] &&
     ok_test "failed attach removes the cached subscription" || fail_test "failed attach removes the cached subscription"
 set_node_name 0 >/dev/null 2>&1
+if ( extra_sub_attach ssrf http://127.0.0.1:10085/sub.yaml ) >/dev/null 2>&1; then
+    fail_test "attaching loopback URL is rejected"
+else
+    ok_test "attaching loopback URL is rejected"
+fi
+if ( extra_sub_attach metadata http://169.254.169.254/latest/meta-data/ ) >/dev/null 2>&1; then
+    fail_test "attaching cloud metadata URL is rejected"
+else
+    ok_test "attaching cloud metadata URL is rejected"
+fi
 extra_sub_attach provider https://subscriptions.example/clash.yaml ""
 assert_file_contains "$CURL_ARGS_LOG" "-A clash-verge" "external fetch presents a Clash user agent"
 assert_eq 1 "$(extra_sub_count)" "external subscription is stored once"
@@ -305,6 +329,7 @@ assert_file_contains "$TMP/fw.rules" "--dport 443" "firewall allows the Xray por
 assert_file_contains "$TMP/fw.rules" "RELATED,ESTABLISHED" "firewall preserves established connections"
 fw_guard_rules >"$TMP/fw-guard.rules"
 assert_file_contains "$TMP/fw-guard.rules" "--uid-owner 0" "Xray API guard is root-only"
+assert_file_contains "$XRAY_CONF" '"port": "10085"' "Xray routing explicitly blocks proxy clients from API port"
 
 cat >"$TMP/stubs/sshd" <<'EOF'
 #!/usr/bin/env bash

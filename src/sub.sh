@@ -136,7 +136,7 @@ sub_regen() {
         sub_render_clash "$name" "$uuid" "$stage/ex/server-rules" \
             "$stage/ex/proxies" "$stage/ex/names" >"$stage/sub/$token.yaml" ||
             { rm -rf "$stage"; warn "Failed to render the subscription for $name"; return 1; }
-    done < <(jq -r '.users[] | select(.disabled_reason != "manual")
+    done < <(jq -r '.users[] | select(.disabled_reason != "manual" and .disabled_reason != "expired")
         | "\(.name)|\(.uuid)|\(.token)|\(.quota)|\(.up)|\(.down)"' "$DB")
 
     if [[ -n $full ]]; then

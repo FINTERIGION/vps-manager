@@ -273,7 +273,7 @@ menu() {
         "10) Service status and logs"
         "11) Update Xray / Caddy"
         "12) Update scripts"
-        "13) Update system kernel"
+        "13) Update system packages and kernel"
         "14) Enable BBR"
         "15) Sync traffic and status now"
         "16) Uninstall vpsm"

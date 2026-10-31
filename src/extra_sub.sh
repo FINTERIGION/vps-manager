@@ -30,6 +30,11 @@ extra_sub_check_filter() {
         err "Invalid filter regular expression: ${1:-}"
 }
 
+extra_sub_check_url() {
+    python3 "$SH_DIR/src/extra_sub.py" check-url "${1:-}" ||
+        err "Invalid or forbidden subscription URL (cannot point to private, loopback, or cloud metadata addresses)"
+}
+
 extra_sub_fetch() {
     local alias=$1 url=$2 filter=${3:-} force=${4:-} stamp="$SUB_EXTRA/$1.stamp" tmp size rc age
     if [[ -z $force && -f $stamp && -f $SUB_EXTRA/$alias.proxies.yaml && -f $SUB_EXTRA/$alias.names.yaml ]]; then
@@ -37,6 +42,10 @@ extra_sub_fetch() {
         ((age < EXTRA_REFRESH)) && return 0
     fi
     [[ $url =~ ^https?:// ]] || { warn "External subscription $alias has an invalid URL"; return 1; }
+    python3 "$SH_DIR/src/extra_sub.py" check-url "$url" >/dev/null 2>&1 || {
+        warn "External subscription $alias has a forbidden URL (loopback or private address)"
+        return 1
+    }
     tmp=$(mktemp -d "$ROOT/.extra.XXXXXX") || return 1
     # Providers often block unknown clients, so always present a Clash/Mihomo UA
     rc=0
@@ -90,6 +99,7 @@ extra_sub_attach() {
     [[ -n $url ]] || err "Usage: vpsm attach <alias> <Clash/Mihomo URL> [filter regex]"
     [[ $url =~ ^https?:// ]] || err "Only HTTP/HTTPS subscription URLs are supported"
     extra_sub_exists "$alias" && err "External subscription $alias already exists"
+    extra_sub_check_url "$url"
     extra_sub_check_filter "$filter"
     extra_sub_fetch "$alias" "$url" "$filter" force || err "External subscription was not attached"
     db_write --arg a "$alias" --arg u "$url" --arg f "$filter" \

@@ -14,6 +14,7 @@ sys.path.insert(0, str(PROJECT))
 from src.extra_sub import (  # noqa: E402
     SubscriptionError,
     check_names,
+    check_url,
     compile_filter,
     normalize,
     write_normalized,
@@ -89,6 +90,32 @@ class ExternalSubscriptionTests(unittest.TestCase):
         names.write_text("      - Osaka\n      - Osaka\n", encoding="utf-8")
         with self.assertRaises(SubscriptionError):
             check_names(names, "local-node")
+
+    def test_catastrophic_backtracking_filter_is_rejected(self):
+        with self.assertRaises(SubscriptionError):
+            compile_filter("^(a+)+$")
+
+    def test_forbidden_urls_are_rejected(self):
+        with self.assertRaises(SubscriptionError):
+            check_url("http://127.0.0.1:10085/sub")
+        with self.assertRaises(SubscriptionError):
+            check_url("http://169.254.169.254/latest/meta-data/")
+        with self.assertRaises(SubscriptionError):
+            check_url("http://localhost:8080/sub")
+
+    def test_proxy_with_disallowed_plugin_is_rejected(self):
+        bad_yaml = self.root / "plugin.yaml"
+        bad_yaml.write_text(
+            "proxies:\n"
+            "  - name: Evil\n"
+            "    type: ss\n"
+            "    server: 1.2.3.4\n"
+            "    port: 8388\n"
+            "    plugin: obfs-local\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(SubscriptionError):
+            normalize(bad_yaml)
 
 
 if __name__ == "__main__":
