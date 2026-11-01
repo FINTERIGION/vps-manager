@@ -1,0 +1,19 @@
+[Unit]
+Description=vpsm FuturesView (web panel disguise backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=@ROOT@/futures-view
+Environment=FT_WEB_ALLOWED_HOSTS=127.0.0.1,localhost,@DOMAIN@
+Environment=FT_WEB_ALLOWED_ORIGINS=https://@DOMAIN@,http://@DOMAIN@
+ExecStart=@ROOT@/futures-view/.venv/bin/python main.py web --host 127.0.0.1 --port @PORT@
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+

@@ -455,7 +455,7 @@ else
 fi
 assert_eq "$old_key" "$(db_get '.settings.private_key')" "failed key rotation keeps the previous key"
 
-for _lib in xray traffic extra_sub sub caddy user firewall security manage; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view; do
     # shellcheck disable=SC1090
     . "$PROJECT/src/$_lib.sh"
 done
@@ -522,6 +522,28 @@ cdn_status_output=$(bash "$PROJECT/vpsm.sh" cdn status)
 [[ $cdn_status_output == *"Status:          Disabled"* ]] &&
     ok_test "CLI cdn status reports disabled" || fail_test "CLI cdn status reports disabled"
 
+# FuturesView functionality tests
+assert_eq "false" "$(fv_enabled && echo true || echo false)" "FuturesView is disabled by default"
+assert_file_not_contains "$CADDYFILE" "handle /api/*" "Caddyfile has no FuturesView API proxy by default"
+assert_file_contains "$CADDYFILE" "try_files {path} /index.html" "Caddyfile has SPA fallback"
+
+fv_test_pass=$(fv_gen_password)
+[[ ${#fv_test_pass} -ge 16 && ${#fv_test_pass} -le 32 ]] &&
+    ok_test "fv_gen_password produces valid high-strength password" || fail_test "fv_gen_password produces valid high-strength password"
+
+db_write '.settings.futures_view.enabled = true'
+caddy_gen
+assert_file_contains "$CADDYFILE" "handle /api/*" "Caddyfile includes /api/* handle when FuturesView enabled"
+assert_file_contains "$CADDYFILE" "reverse_proxy 127.0.0.1:8888" "Caddyfile proxies /api/* to FV_PORT"
+
+fv_status_out=$(fv_status)
+[[ $fv_status_out == *"FuturesView Panel Status"* && $fv_status_out == *"127.0.0.1:8888"* ]] &&
+    ok_test "fv_status displays status and port" || fail_test "fv_status displays status and port"
+
+db_write '.settings.futures_view.enabled = false'
+caddy_gen
+assert_file_not_contains "$CADDYFILE" "handle /api/*" "disabling FuturesView removes API proxy from Caddyfile"
+
 if grep -R -E -n 'cluster_cmd|cluster_is|menu_cluster|cluster_(init|join|report|fetch)' \
     "$PROJECT/src" "$PROJECT/systemd" "$PROJECT/vpsm.sh" "$PROJECT/install.sh" >/dev/null; then
     fail_test "production code contains no cluster runtime calls"
@@ -531,7 +553,7 @@ fi
 help_output=$(bash "$PROJECT/vpsm.sh" help)
 [[ $help_output == *"single-node multi-user"* ]] && ok_test "English CLI help is available" || fail_test "English CLI help is available"
 menu_output=$(printf '0\n' | bash "$PROJECT/vpsm.sh" 2>/dev/null)
-if [[ $menu_output == *"1) Change SSH port"* && $menu_output == *"16) Uninstall vpsm"* ]]; then
+if [[ $menu_output == *"1) Change SSH port"* && $menu_output == *"16) Manage FuturesView panel"* && $menu_output == *"17) Uninstall vpsm"* ]]; then
     ok_test "interactive CLI renders the complete numeric panel"
 else
     fail_test "interactive CLI renders the complete numeric panel"

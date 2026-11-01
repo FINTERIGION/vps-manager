@@ -36,6 +36,15 @@ $body
 EOF
 }
 
+fv_enabled() {
+    [[ -f $DB ]] || return 1
+    [[ $(db_get '.settings.futures_view.enabled // false') == true ]]
+}
+
+fv_port() {
+    db_get '.settings.futures_view.port // 8888'
+}
+
 caddy_stale() {
     local domain port want cdn_d
     [[ -f $CADDYFILE ]] || return 0
@@ -58,12 +67,17 @@ caddy_stale() {
     else
         grep -qF "127.0.0.1:$WS_PORT" "$CADDYFILE" && return 0
     fi
+    if fv_enabled; then
+        grep -qF "127.0.0.1:$(fv_port)" "$CADDYFILE" || return 0
+    else
+        grep -qF "127.0.0.1:$(fv_port)" "$CADDYFILE" && return 0
+    fi
     grep -qF "vpsm-http-redirect-only" "$CADDYFILE" && return 1
     return 0
 }
 
 caddy_gen() {
-    local domain port tmp cdn_d cdn_p https_hosts http_hosts cdn_handle=""
+    local domain port tmp cdn_d cdn_p https_hosts http_hosts cdn_handle="" fv_handle=""
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
     [[ $port == 443 ]] && port="" || port=":$port"
@@ -88,6 +102,13 @@ caddy_gen() {
         fi
         cdn_handle="	handle $cdn_p {
 		reverse_proxy 127.0.0.1:$WS_PORT
+	}
+"
+    fi
+
+    if fv_enabled; then
+        fv_handle="	handle /api/* {
+		reverse_proxy 127.0.0.1:$(fv_port)
 	}
 "
     fi
@@ -124,7 +145,8 @@ $https_hosts {
 	}
 	import site
 	import $CADDY_USERS/*.conf
-${cdn_handle}	handle {
+${cdn_handle}${fv_handle}	handle {
+		try_files {path} /index.html
 		file_server
 	}
 }

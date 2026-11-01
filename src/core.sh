@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.2.0"
+VPSM_VERSION="1.3.0"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -33,6 +33,10 @@ API_PORT=10085
 API_ADDR="127.0.0.1:$API_PORT"
 CADDY_PORT=8443
 WS_PORT=10086
+FV_PORT=8888
+FV_DIR="$ROOT/futures-view"
+FV_SVC="vpsm-futures-view"
+FV_REPO="https://github.com/FINTERIGION/futures-view.git"
 INBOUND_TAG="vless-reality"
 XRAY_SVC="vpsm-xray"
 CADDY_SVC="vpsm-caddy"
@@ -157,6 +161,7 @@ db_migrate() {
     db_write 'if (.settings.expire // null) == null then .settings.expire = (.users[0].expire // "") else . end
         | .settings.extra_subs = (.settings.extra_subs // [])
         | .settings.cdn = ({enabled: false, domain: "", server: "", port: 443, path: "/vless-ws"} + (.settings.cdn // {}))
+        | .settings.futures_view = ({enabled: false, port: 8888, repo: "https://github.com/FINTERIGION/futures-view.git", password: ""} + (.settings.futures_view // {}))
         | del(.settings.ssh_port)
         | .users |= map(del(.expire, .sources, .extra_subs))'
 }
@@ -169,7 +174,7 @@ gen_uuid() { cat /proc/sys/kernel/random/uuid; }
 valid_name() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ && $1 != all ]]; }
 valid_domain() { [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]; }
 valid_port() { [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && (($1 <= 65535)); }
-valid_xray_port() { valid_port "$1" && (($1 != 80 && $1 != CADDY_PORT && $1 != API_PORT && $1 != WS_PORT)); }
+valid_xray_port() { valid_port "$1" && (($1 != 80 && $1 != CADDY_PORT && $1 != API_PORT && $1 != WS_PORT && $1 != FV_PORT)); }
 valid_shortid() { [[ $1 =~ ^([0-9a-fA-F]{2}){1,8}$ ]]; }
 is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
 

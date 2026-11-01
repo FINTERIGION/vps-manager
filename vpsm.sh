@@ -5,7 +5,7 @@ set -o pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 # shellcheck source=src/core.sh
 . "$(dirname "$SELF")/src/core.sh"
-for _lib in xray traffic extra_sub sub caddy user firewall security manage; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view; do
     # shellcheck disable=SC1090
     . "$SH_DIR/src/$_lib.sh"
 done
@@ -230,18 +230,22 @@ services_menu() {
         echo "1) Restart Xray and Caddy"
         echo "2) Restart Xray"
         echo "3) Restart Caddy"
-        echo "4) Follow Xray log"
-        echo "5) Follow Caddy log"
-        echo "6) Show traffic sync log"
+        echo "4) Restart FuturesView"
+        echo "5) Follow Xray log"
+        echo "6) Follow Caddy log"
+        echo "7) Follow FuturesView log"
+        echo "8) Show traffic sync log"
         echo "0) Back"
         a=$(ask "Choose: ")
         case $a in
             1) run_locked svc_restart all ;;
             2) run_locked svc_restart xray ;;
             3) run_locked svc_restart caddy ;;
-            4) show_log xray ;;
-            5) show_log caddy ;;
-            6) show_log sync ;;
+            4) run_locked svc_restart fv ;;
+            5) show_log xray ;;
+            6) show_log caddy ;;
+            7) show_log fv ;;
+            8) show_log sync ;;
             0 | "") return 0 ;;
             *) continue ;;
         esac
@@ -310,7 +314,8 @@ menu() {
         "13) Update system packages and kernel"
         "14) Enable BBR"
         "15) Sync traffic and status now"
-        "16) Uninstall vpsm"
+        "16) Manage FuturesView panel"
+        "17) Uninstall vpsm"
         " 0) Exit"
     )
     width=$(menu_width "${security[@]}" "${node[@]}" "${system[@]}")
@@ -341,7 +346,8 @@ menu() {
             13) run_locked update_kernel ;;
             14) enable_bbr ;;
             15) run_locked sync_all; ok "Traffic and status synchronized" ;;
-            16) run_locked do_uninstall; [[ -f $DB ]] || exit 0 ;;
+            16) futures_view_menu; continue ;;
+            17) run_locked do_uninstall; [[ -f $DB ]] || exit 0 ;;
             0 | q | Q) exit 0 ;;
             *) continue ;;
         esac
@@ -427,6 +433,7 @@ main() {
         key) run_locked set_key "$@" ;;
         shortid) run_locked set_shortid "$@" ;;
         rules) edit_rules ;;
+        fv | futures-view) run_locked fv_cmd "$@" ;;
         regen) run_locked regen_all ;;
         sync) run_locked sync_all ;;
         status | s) show_status ;;

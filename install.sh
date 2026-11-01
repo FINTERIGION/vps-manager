@@ -160,7 +160,7 @@ echo "$REPO $REF" >"$VPSM_ROOT/repo"
 chmod 600 "$VPSM_ROOT/repo"
 # shellcheck disable=SC1091
 . "$VPSM_ROOT/sh/src/core.sh"
-for _lib in xray traffic extra_sub sub caddy user firewall security manage; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view; do
     # shellcheck disable=SC1090
     . "$SH_DIR/src/$_lib.sh"
 done

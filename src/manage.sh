@@ -4,11 +4,14 @@
 install_units() {
     UNITS_CHANGED=""
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
-    local units=(vpsm-xray.service vpsm-caddy.service vpsm-traffic.service vpsm-traffic.timer vpsm-firewall.service)
-    local u dst new f base
+    local units=(vpsm-xray.service vpsm-caddy.service vpsm-traffic.service vpsm-traffic.timer vpsm-firewall.service vpsm-futures-view.service)
+    local u dst new f base domain port
+    domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
+    port=$(fv_port 2>/dev/null || echo "8888")
     for u in "${units[@]}"; do
         dst=/etc/systemd/system/$u
-        new=$(sed "s#@ROOT@#$ROOT#g" "$SH_DIR/systemd/$u")
+        [[ -f $SH_DIR/systemd/$u ]] || continue
+        new=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/$u")
         [[ -f $dst && $(<"$dst") == "$new" ]] && continue
         printf '%s\n' "$new" >"$dst"
         UNITS_CHANGED+=" $u"
@@ -31,6 +34,7 @@ restart_changed_units() {
         case $u in
             vpsm-xray.service) xray_active && xray_restart force && ok "Restarted $XRAY_SVC (unit updated)" ;;
             vpsm-caddy.service) svc_active "$CADDY_SVC" && svc restart "$CADDY_SVC" && ok "Restarted $CADDY_SVC (unit updated)" ;;
+            vpsm-futures-view.service) fv_enabled && svc_active "$FV_SVC" && svc restart "$FV_SVC" && ok "Restarted $FV_SVC (unit updated)" ;;
             vpsm-traffic.timer) svc try-restart vpsm-traffic.timer ;;
             vpsm-firewall.service) svc try-restart "$FW_SVC" ;;
         esac
@@ -42,8 +46,9 @@ svc_targets() {
     case ${1:-all} in
         xray) echo "$XRAY_SVC" ;;
         caddy) echo "$CADDY_SVC" ;;
-        all | "") echo "$XRAY_SVC $CADDY_SVC" ;;
-        *) err "Unknown target: $1 (choose xray | caddy | all)" ;;
+        fv | futures-view) echo "$FV_SVC" ;;
+        all | "") echo "$XRAY_SVC $CADDY_SVC$(fv_enabled && echo " $FV_SVC")" ;;
+        *) err "Unknown target: $1 (choose xray | caddy | fv | all)" ;;
     esac
 }
 svc_start() {
@@ -103,13 +108,17 @@ show_node_info() {
 
 show_status() {
     local s state pid rss ver expire
-    for s in "$XRAY_SVC" "$CADDY_SVC"; do
-        state=$(systemctl is-active "$s" 2>/dev/null)
+    local svcs=("$XRAY_SVC" "$CADDY_SVC")
+    if fv_enabled || [[ -d $FV_DIR ]]; then
+        svcs+=("$FV_SVC")
+    fi
+    for s in "${svcs[@]}"; do
+        state=$(systemctl is-active "$s" 2>/dev/null || echo "inactive")
         rss="-"
         if [[ $state == active ]]; then
-            pid=$(systemctl show -p MainPID --value "$s")
+            pid=$(systemctl show -p MainPID --value "$s" 2>/dev/null)
             [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] &&
-                rss="$(($(ps -o rss= -p "$pid" | tr -d ' ') / 1024)) MB"
+                rss="$(($(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ') / 1024)) MB"
         fi
         printf '%-14s %-10s memory: %s\n' "$s" "$state" "$rss"
     done
@@ -117,6 +126,7 @@ show_status() {
     expire=$(db_get '.settings.expire // ""')
     echo "Xray version:  ${ver:-unknown}"
     echo "Caddy version: $(cat "$BIN_DIR/caddy.version" 2>/dev/null || echo unknown)"
+    echo "FuturesView:   $([[ -d $FV_DIR/.git ]] && echo "installed ($(fv_enabled && echo "enabled" || echo "disabled"))" || echo "not installed")"
     echo "Domain/port:   $(db_get '.settings.domain'):$(db_get '.settings.port')"
     echo "Node name:     $(node_name)"
     echo "CDN node:      $(if cdn_enabled; then echo "enabled ($(cdn_node_name))"; else echo "disabled"; fi)"
@@ -133,8 +143,9 @@ show_log() {
     case ${1:-xray} in
         xray) journalctl -u "$XRAY_SVC" -n 100 --no-pager -f ;;
         caddy) journalctl -u "$CADDY_SVC" -n 100 --no-pager -f ;;
+        fv | futures-view) journalctl -u "$FV_SVC" -n 100 --no-pager -f ;;
         sync | traffic) journalctl -u vpsm-traffic.service -n 100 --no-pager ;;
-        *) err "Usage: vpsm log [xray|caddy|sync]" ;;
+        *) err "Usage: vpsm log [xray|caddy|fv|sync]" ;;
     esac
 }
 
@@ -402,8 +413,9 @@ Security:
 System:
   sync                              Sync traffic, quota and expiry now
   status                            Show service and security status
-  start|stop|restart [xray|caddy|all]
-  log [xray|caddy|sync]
+  start|stop|restart [xray|caddy|fv|all]
+  log [xray|caddy|fv|sync]
+  fv [deploy|update|status|password|restart|log|remove] Manage FuturesView web panel
   update [core|caddy|sh|all]        Update components and scripts, not the kernel
   kernel [-y]                       Update system packages and kernel safely
   bbr                               Enable BBR
