@@ -54,10 +54,10 @@ fv_status() {
 
 fv_check_prereqs() {
     local missing=() p
-    for p in git python3 node npm; do
+    for p in git python3 curl; do
         command -v "$p" >/dev/null 2>&1 || missing+=("$p")
     done
-    if ! python3 -m venv --help >/dev/null 2>&1; then
+    if ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
         missing+=(python3-venv)
     fi
     if ((${#missing[@]} > 0)); then
@@ -67,6 +67,32 @@ fv_check_prereqs() {
                 err "Failed to install required packages: ${missing[*]}"
         else
             err "Missing required dependencies: ${missing[*]}. Please install them first."
+        fi
+    fi
+
+    # WebUI toolchain (Vite / Rolldown) requires Node.js >= 20.12 (util.styleText support)
+    local node_ver="" node_major=0
+    if command -v node >/dev/null 2>&1; then
+        node_ver=$(node -v 2>/dev/null || echo "")
+        node_major=$(echo "$node_ver" | sed -E 's/^v([0-9]+).*/\1/')
+    fi
+    [[ $node_major =~ ^[0-9]+$ ]] || node_major=0
+
+    if ((node_major < 20)) || ! command -v npm >/dev/null 2>&1; then
+        if [[ $EUID -eq 0 ]] && command -v apt-get >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+            msg "Node.js >= 20 is required for WebUI build (found: ${node_ver:-none}). Installing Node.js 22 LTS via NodeSource ..."
+            curl -fsSL https://deb.nodesource.com/setup_22.x | bash - &&
+                apt-get install -y nodejs ||
+                warn "Failed to install Node.js 22 from NodeSource, attempting default package..."
+        fi
+        node_major=0
+        if command -v node >/dev/null 2>&1; then
+            node_ver=$(node -v 2>/dev/null || echo "")
+            node_major=$(echo "$node_ver" | sed -E 's/^v([0-9]+).*/\1/')
+        fi
+        [[ $node_major =~ ^[0-9]+$ ]] || node_major=0
+        if ((node_major < 20)) || ! command -v npm >/dev/null 2>&1; then
+            err "Node.js >= 20 and npm are required (found: ${node_ver:-none}). Please install Node.js 20 or 22: curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs"
         fi
     fi
 }
@@ -88,8 +114,9 @@ fv_deploy() {
         git -C "$FV_DIR" pull --ff-only 2>/dev/null || warn "git pull failed, using current checkout"
     fi
 
-    if [[ ! -x $FV_DIR/.venv/bin/python ]]; then
+    if [[ ! -x $FV_DIR/.venv/bin/python || ! -x $FV_DIR/.venv/bin/pip ]]; then
         msg "Creating Python virtual environment in $FV_DIR/.venv ..."
+        rm -rf "$FV_DIR/.venv"
         python3 -m venv "$FV_DIR/.venv" || err "Failed to create Python virtualenv"
     fi
 
@@ -162,6 +189,7 @@ fv_update() {
     [[ -d $FV_DIR/.git ]] || err "FuturesView is not installed. Run: vpsm fv deploy"
 
     echo "=== Updating FuturesView ==="
+    fv_check_prereqs
     msg "Pulling latest code from git ..."
     local branch
     branch=$(git -C "$FV_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
