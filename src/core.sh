@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.1.3"
+VPSM_VERSION="1.2.0"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -32,6 +32,7 @@ EXTRA_UA=${VPSM_EXTRA_UA:-clash-verge/v2.0.0 mihomo/1.18.0}
 API_PORT=10085
 API_ADDR="127.0.0.1:$API_PORT"
 CADDY_PORT=8443
+WS_PORT=10086
 INBOUND_TAG="vless-reality"
 XRAY_SVC="vpsm-xray"
 CADDY_SVC="vpsm-caddy"
@@ -155,6 +156,7 @@ db_migrate() {
     fi
     db_write 'if (.settings.expire // null) == null then .settings.expire = (.users[0].expire // "") else . end
         | .settings.extra_subs = (.settings.extra_subs // [])
+        | .settings.cdn = ({enabled: false, domain: "", server: "", port: 443, path: "/vless-ws"} + (.settings.cdn // {}))
         | del(.settings.ssh_port)
         | .users |= map(del(.expire, .sources, .extra_subs))'
 }
@@ -167,7 +169,7 @@ gen_uuid() { cat /proc/sys/kernel/random/uuid; }
 valid_name() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ && $1 != all ]]; }
 valid_domain() { [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]; }
 valid_port() { [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && (($1 <= 65535)); }
-valid_xray_port() { valid_port "$1" && (($1 != 80 && $1 != CADDY_PORT && $1 != API_PORT)); }
+valid_xray_port() { valid_port "$1" && (($1 != 80 && $1 != CADDY_PORT && $1 != API_PORT && $1 != WS_PORT)); }
 valid_shortid() { [[ $1 =~ ^([0-9a-fA-F]{2}){1,8}$ ]]; }
 is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
 
@@ -238,6 +240,31 @@ parse_expire() {
 
 node_name() { db_get 'if (.settings.name // "") == "" then .settings.domain else .settings.name end'; }
 local_proxy_name() { node_name; }
+cdn_node_name() { printf '%s [CDN]\n' "$(local_proxy_name)"; }
+cdn_enabled() { [[ $(db_get '.settings.cdn.enabled // false') == true ]]; }
+cdn_domain() {
+    local d
+    d=$(db_get '.settings.cdn.domain // empty')
+    [[ -n $d && $d != null ]] && printf '%s\n' "$d" || db_get '.settings.domain'
+}
+cdn_server() {
+    local s
+    s=$(db_get '.settings.cdn.server // empty')
+    [[ -n $s && $s != null ]] && printf '%s\n' "$s" || cdn_domain
+}
+cdn_port() {
+    local p
+    p=$(db_get '.settings.cdn.port // 443')
+    [[ $p =~ ^[0-9]+$ ]] || p=443
+    printf '%s\n' "$p"
+}
+cdn_path() {
+    local p
+    p=$(db_get '.settings.cdn.path // empty')
+    [[ -n $p && $p != null ]] || p="/vless-ws"
+    [[ $p == /* ]] || p="/$p"
+    printf '%s\n' "$p"
+}
 sub_name() {
     local n
     n=$(db_get '.settings.sub_name // empty')

@@ -35,28 +35,42 @@ xray_gen_config() {
     XRAY_CONF_CHANGED=""
     tmp=$(mktemp "$ROOT/.cfg.XXXXXX.json") || err "Failed to create temporary file"
     if ! jq --argjson apiport "$API_PORT" --arg tag "$INBOUND_TAG" --arg dest "127.0.0.1:$CADDY_PORT" \
+        --argjson cdnenabled "$(cdn_enabled && echo true || echo false)" \
+        --argjson wsport "$WS_PORT" --arg cdnpath "$(cdn_path)" \
         --argjson selfips "$(self_ips)" '
         .settings as $s | {
           log: {loglevel: "warning", access: "none"},
           stats: {},
           api: {tag: "api", services: ["StatsService", "HandlerService"]},
           policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}},
-          inbounds: [
-            {tag: "api", listen: "127.0.0.1", port: $apiport, protocol: "dokodemo-door",
-             settings: {address: "127.0.0.1"}},
-            {tag: $tag, port: $s.port, protocol: "vless",
-             settings: {
-               clients: [.users[] | select(.enabled)
-                         | {id: .uuid, email: .name, flow: "xtls-rprx-vision", level: 0}],
-               decryption: "none"},
-             streamSettings: {
-               network: "tcp", security: "reality",
-               realitySettings: {
-                 show: false, dest: $dest, xver: 0,
-                 serverNames: [$s.domain], privateKey: $s.private_key, shortIds: $s.short_ids,
-                 minClientVer: "1.8.2"}},
-             sniffing: {enabled: true, destOverride: ["http", "tls"], routeOnly: true}}
-          ],
+          inbounds: (
+            [
+              {tag: "api", listen: "127.0.0.1", port: $apiport, protocol: "dokodemo-door",
+               settings: {address: "127.0.0.1"}},
+              {tag: $tag, port: $s.port, protocol: "vless",
+               settings: {
+                 clients: [.users[] | select(.enabled)
+                           | {id: .uuid, email: .name, flow: "xtls-rprx-vision", level: 0}],
+                 decryption: "none"},
+               streamSettings: {
+                 network: "tcp", security: "reality",
+                 realitySettings: {
+                   show: false, dest: $dest, xver: 0,
+                   serverNames: [$s.domain], privateKey: $s.private_key, shortIds: $s.short_ids,
+                   minClientVer: "1.8.2"}},
+               sniffing: {enabled: true, destOverride: ["http", "tls"], routeOnly: true}}
+            ] + (if $cdnenabled then [
+              {tag: "vless-ws", listen: "127.0.0.1", port: $wsport, protocol: "vless",
+               settings: {
+                 clients: [.users[] | select(.enabled)
+                           | {id: .uuid, email: .name, level: 0}],
+                 decryption: "none"},
+               streamSettings: {
+                 network: "ws", security: "none",
+                 wsSettings: {path: $cdnpath}},
+               sniffing: {enabled: true, destOverride: ["http", "tls"], routeOnly: true}}
+            ] else [] end)
+          ),
           dns: {servers: ["localhost"], queryStrategy: "UseIPv4"},
           outbounds: [
             {tag: "direct", protocol: "freedom",
@@ -65,7 +79,7 @@ xray_gen_config() {
           ],
           routing: {domainStrategy: "IPIfNonMatch", rules: [
             {type: "field", inboundTag: ["api"], outboundTag: "api"},
-            {type: "field", inboundTag: [$tag], port: "\($apiport)", outboundTag: "block"},
+            {type: "field", inboundTag: ([$tag] + (if $cdnenabled then ["vless-ws"] else [] end)), port: "\($apiport)", outboundTag: "block"},
             {type: "field", protocol: ["bittorrent"], outboundTag: "block"},
             {type: "field", port: "25", outboundTag: "block"},
             {type: "field", ip: (["geoip:private", "geoip:cn"] + $selfips), outboundTag: "block"}
@@ -107,7 +121,18 @@ xray_adu() {
           settings:{clients:[{id:$id,email:$email,flow:"xtls-rprx-vision",level:0}],decryption:"none"}}]}' >"$f"
     out=$(timeout 15 "$XRAY_BIN" api adu -s "$API_ADDR" "$f" 2>&1)
     rm -f "$f"
-    [[ $out == *"Added 1 user"* ]]
+    [[ $out == *"Added 1 user"* ]] || return 1
+    if cdn_enabled; then
+        f=$(mktemp "$ROOT/.adu.XXXXXX.json") || return 1
+        jq -n --arg tag "vless-ws" --argjson port "$WS_PORT" \
+            --arg id "$uuid" --arg email "$name" \
+            '{inbounds:[{tag:$tag,port:$port,protocol:"vless",
+              settings:{clients:[{id:$id,email:$email,level:0}],decryption:"none"}}]}' >"$f"
+        out=$(timeout 15 "$XRAY_BIN" api adu -s "$API_ADDR" "$f" 2>&1)
+        rm -f "$f"
+        [[ $out == *"Added 1 user"* ]] || return 1
+    fi
+    return 0
 }
 
 xray_restart() {

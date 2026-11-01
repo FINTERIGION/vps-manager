@@ -67,6 +67,35 @@ swap_menu() {
     done
 }
 
+cdn_menu() {
+    local a value
+    while true; do
+        cls
+        echo "=== CDN Node Settings (Cloudflare WS) ==="
+        show_cdn_info
+        echo
+        echo "1) Enable CDN node"
+        echo "2) Disable CDN node"
+        echo "3) Set CDN domain (SNI / Host, 0 = main domain)"
+        echo "4) Set CDN server (preferred IP / CNAME, 0 = CDN domain)"
+        echo "5) Set CDN port (default: 443)"
+        echo "6) Set WebSocket path (default: /vless-ws)"
+        echo "0) Back"
+        a=$(ask "Choose: ")
+        case $a in
+            1) run_locked set_cdn_status true ;;
+            2) run_locked set_cdn_status false ;;
+            3) value=$(ask "CDN domain (0 = main domain): "); run_locked set_cdn_domain "$value" ;;
+            4) value=$(ask "CDN server/preferred IP (0 = CDN domain): "); run_locked set_cdn_server "$value" ;;
+            5) value=$(ask "CDN port [443]: "); run_locked set_cdn_port "$value" ;;
+            6) value=$(ask "WebSocket path [/vless-ws]: "); run_locked set_cdn_path "$value" ;;
+            0 | "") return 0 ;;
+            *) continue ;;
+        esac
+        pause
+    done
+}
+
 node_settings_menu() {
     local a value
     while true; do
@@ -82,6 +111,7 @@ node_settings_menu() {
         echo "6) Set monthly reset day"
         echo "7) Rotate Reality key pair"
         echo "8) Change Reality shortId"
+        echo "9) Configure CDN node (Cloudflare WS)"
         echo "0) Back"
         a=$(ask "Choose: ")
         case $a in
@@ -93,6 +123,7 @@ node_settings_menu() {
             6) value=$(ask "Monthly reset day (1-28): "); run_locked set_reset_day "$value" ;;
             7) run_locked set_key ;;
             8) value=$(ask "shortId (empty = random): "); run_locked set_shortid "$value" ;;
+            9) cdn_menu; continue ;;
             0 | "") return 0 ;;
             *) continue ;;
         esac
@@ -181,6 +212,9 @@ subscription_menu() {
     echo
     echo "Clash subscription: $(sub_url "$name")"
     echo "VLESS share link:   $(vless_share_url "$name")"
+    if cdn_enabled; then
+        echo "CDN share link:     $(vless_cdn_share_url "$name")"
+    fi
     echo
     answer=$(ask "Show subscription QR code? [y/N]: ")
     [[ ${answer,,} == y ]] && user_qr "$name"
@@ -350,6 +384,7 @@ node_cmd() {
         key) shift; set_key "$@" ;;
         shortid) shift; set_shortid "$@" ;;
         name) shift; set_node_name "$*" ;;
+        cdn) shift; cdn_cmd "$@" ;;
         "") show_node_info ;;
         *) set_node_name "$*" ;;
     esac
@@ -369,6 +404,7 @@ main() {
         user) run_locked user_cmd "$@" ;;
         sub | link) run_locked sub_cmd "$@" ;;
         node) run_locked node_cmd "$@" ;;
+        cdn) run_locked cdn_cmd "$@" ;;
         a | add) run_locked user_add "$@" ;;
         d | del | rm) run_locked user_del "$@" ;;
         l | ls | list) run_locked user_list ;;

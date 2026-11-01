@@ -37,7 +37,7 @@ EOF
 }
 
 caddy_stale() {
-    local domain port want
+    local domain port want cdn_d
     [[ -f $CADDYFILE ]] || return 0
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
@@ -46,13 +46,24 @@ caddy_stale() {
     else
         want="redir https://$domain:$port{uri}"
     fi
-    grep -qF "$want" "$CADDYFILE" && grep -qF "$domain:$CADDY_PORT {" "$CADDYFILE" &&
-        grep -qF "vpsm-http-redirect-only" "$CADDYFILE" && return 1
+    grep -qF "$want" "$CADDYFILE" || return 0
+    grep -qF "$domain:$CADDY_PORT" "$CADDYFILE" || return 0
+    if cdn_enabled; then
+        cdn_d=$(cdn_domain)
+        grep -qF "127.0.0.1:$WS_PORT" "$CADDYFILE" || return 0
+        grep -qF "$(cdn_path)" "$CADDYFILE" || return 0
+        if [[ $cdn_d != "$domain" ]]; then
+            grep -qF "$cdn_d:$CADDY_PORT" "$CADDYFILE" || return 0
+        fi
+    else
+        grep -qF "127.0.0.1:$WS_PORT" "$CADDYFILE" && return 0
+    fi
+    grep -qF "vpsm-http-redirect-only" "$CADDYFILE" && return 1
     return 0
 }
 
 caddy_gen() {
-    local domain port tmp
+    local domain port tmp cdn_d cdn_p https_hosts http_hosts cdn_handle=""
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
     [[ $port == 443 ]] && port="" || port=":$port"
@@ -64,6 +75,21 @@ caddy_gen() {
     if [[ ! -f $WWW_DIR/index.html ]] || grep -qF "$CADDY_OLD_INDEX" "$WWW_DIR/index.html"; then
         caddy_gen_index >"$WWW_DIR/index.html"
         chmod 644 "$WWW_DIR/index.html"
+    fi
+
+    https_hosts="$domain:$CADDY_PORT"
+    http_hosts="http://$domain"
+    if cdn_enabled; then
+        cdn_d=$(cdn_domain)
+        cdn_p=$(cdn_path)
+        if [[ $cdn_d != "$domain" ]]; then
+            https_hosts="$domain:$CADDY_PORT, $cdn_d:$CADDY_PORT"
+            http_hosts="http://$domain, http://$cdn_d"
+        fi
+        cdn_handle="	handle $cdn_p {
+		reverse_proxy 127.0.0.1:$WS_PORT
+	}
+"
     fi
 
     tmp=$(mktemp "$CADDY_DIR/.Caddyfile.XXXXXX") || err "Failed to create temporary file"
@@ -89,7 +115,7 @@ caddy_gen() {
 	}
 }
 
-$domain:$CADDY_PORT {
+$https_hosts {
 	bind 127.0.0.1
 	tls {
 		issuer acme {
@@ -98,14 +124,14 @@ $domain:$CADDY_PORT {
 	}
 	import site
 	import $CADDY_USERS/*.conf
-	handle {
+${cdn_handle}	handle {
 		file_server
 	}
 }
 
-http://$domain {
+$http_hosts {
 	import site
-	# vpsm-http-redirect-only: ACME HTTP-01 and HTTPS redirect
+${cdn_handle}	# vpsm-http-redirect-only: ACME HTTP-01 and HTTPS redirect
 	handle {
 		redir https://$domain$port{uri} permanent
 	}

@@ -2,12 +2,18 @@
 # vpsm - one Clash/Mihomo YAML and one Caddy route per user
 
 sub_server_rules() {
-    local domain
+    local domain cdn_d
     domain=$(db_get '.settings.domain')
     echo "DOMAIN-SUFFIX,$domain,DIRECT"
+    if cdn_enabled; then
+        cdn_d=$(cdn_domain)
+        [[ $cdn_d != "$domain" ]] && echo "DOMAIN-SUFFIX,$cdn_d,DIRECT"
+    fi
     {
         self_ips | jq -r '.[]'
-        timeout 5 getent ahosts "$domain" 2>/dev/null | awk '{print $1}'
+        if ! cdn_enabled; then
+            timeout 5 getent ahosts "$domain" 2>/dev/null | awk '{print $1}'
+        fi
     } | awk '
         /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
             split($0, o, ".")
@@ -26,14 +32,29 @@ sub_server_rules() {
 
 sub_render_clash() {
     local name=$1 uuid=$2 sf=$3 ef=${4:-} nf=${5:-} domain port pbk sid node mlkem
+    local cdn_on cdn_node cdn_server cdn_port cdn_sni cdn_host cdn_path
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
     pbk=$(db_get '.settings.public_key')
     sid=$(db_get '.settings.short_ids[0]')
     node=$(local_proxy_name)
     if xray_mlkem_ok; then mlkem=true; else mlkem=false; fi
+    if cdn_enabled; then
+        cdn_on=true
+        cdn_node=$(cdn_node_name)
+        cdn_server=$(cdn_server)
+        cdn_port=$(cdn_port)
+        cdn_sni=$(cdn_domain)
+        cdn_host=$(cdn_domain)
+        cdn_path=$(cdn_path)
+    else
+        cdn_on=false
+        cdn_node="" cdn_server="" cdn_port="" cdn_sni="" cdn_host="" cdn_path=""
+    fi
     awk -v node="$node" -v server="$domain" -v port="$port" -v uuid="$uuid" \
         -v pbk="$pbk" -v sid="$sid" -v sni="$domain" -v user="$name" -v mlkem="$mlkem" \
+        -v cdnon="$cdn_on" -v cdnnode="$cdn_node" -v cdnserver="$cdn_server" \
+        -v cdnport="$cdn_port" -v cdnsni="$cdn_sni" -v cdnhost="$cdn_host" -v cdnpath="$cdn_path" \
         -v cf="$CUSTOM_RULES" -v sf="$sf" -v ef="$ef" -v nf="$nf" '
         function rep(s, k, v,   i, out) {
             out = ""
@@ -59,6 +80,31 @@ sub_render_clash() {
         }
         /^[[:space:]]*#[[:space:]]*__CUSTOM_RULES__/ { rules(cf); next }
         /^[[:space:]]*#[[:space:]]*__SERVER_RULES__/ { rules(sf); next }
+        /^[[:space:]]*#[[:space:]]*__CDN_PROXY__/ {
+            if (cdnon == "true") {
+                print "  - name: \"" cdnnode "\""
+                print "    type: vless"
+                print "    server: " cdnserver
+                print "    port: " cdnport
+                print "    uuid: " uuid
+                print "    network: ws"
+                print "    udp: true"
+                print "    tls: true"
+                print "    servername: " cdnsni
+                print "    client-fingerprint: chrome"
+                print "    ws-opts:"
+                print "      path: " cdnpath
+                print "      headers:"
+                print "        Host: " cdnhost
+            }
+            next
+        }
+        /^[[:space:]]*#[[:space:]]*__CDN_NAME__/ {
+            if (cdnon == "true") {
+                print "      - \"" cdnnode "\""
+            }
+            next
+        }
         /^[[:space:]]*#[[:space:]]*__EXTRA_PROXIES__/ { dump(ef); next }
         /^[[:space:]]*#[[:space:]]*__EXTRA_NAMES__/ { dump(nf); next }
         {

@@ -126,6 +126,9 @@ user_info() {
     echo "External subs:  $(extra_sub_count) shared by every user"
     echo "Subscription:   $(sub_url "$n")"
     echo "Share link:     $(vless_share_url "$n")"
+    if cdn_enabled; then
+        echo "CDN share link: $(vless_cdn_share_url "$n")"
+    fi
 }
 
 user_sub() {
@@ -140,6 +143,18 @@ vless_share_url() {
     url="vless://$(user_get "$1" '.uuid')@$domain:$port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$domain&fp=chrome&pbk=$(db_get '.settings.public_key')&sid=$(db_get '.settings.short_ids[0]')&type=tcp"
     xray_mlkem_ok && url+="&support-x25519mlkem768=true"
     printf '%s#%s\n' "$url" "$(urlencode "$(local_proxy_name)")"
+}
+
+vless_cdn_share_url() {
+    local domain server port path url uuid node
+    uuid=$(user_get "$1" '.uuid')
+    domain=$(cdn_domain)
+    server=$(cdn_server)
+    port=$(cdn_port)
+    path=$(cdn_path)
+    node=$(cdn_node_name)
+    url="vless://${uuid}@${server}:${port}?encryption=none&security=tls&sni=${domain}&fp=chrome&type=ws&path=$(urlencode "$path")&host=${domain}"
+    printf '%s#%s\n' "$url" "$(urlencode "$node")"
 }
 
 user_url() {
@@ -469,4 +484,174 @@ EOF
     "${EDITOR:-vi}" "$CUSTOM_RULES"
     run_locked sub_regen force || return 1
     ok "Subscriptions updated, takes effect after clients refresh"
+}
+
+show_cdn_info() {
+    echo "=== CDN Node Configuration ==="
+    if cdn_enabled; then
+        echo "Status:          Enabled"
+        echo "Node name:       $(cdn_node_name)"
+        echo "CDN Domain:      $(cdn_domain)"
+        echo "CDN Server:      $(cdn_server)"
+        echo "CDN Port:        $(cdn_port)"
+        echo "WS Path:         $(cdn_path)"
+        echo "Local WS Port:   127.0.0.1:$WS_PORT (internal)"
+    else
+        echo "Status:          Disabled"
+        echo "CDN Domain:      $(cdn_domain) (default)"
+        echo "CDN Server:      $(cdn_server) (default)"
+        echo "CDN Port:        $(cdn_port) (default)"
+        echo "WS Path:         $(cdn_path) (default)"
+    fi
+}
+
+set_cdn_status() {
+    local target=${1:-} db_snap
+    case ${target,,} in
+        true | 1 | on | enable) target=true ;;
+        false | 0 | off | disable) target=false ;;
+        "")
+            if cdn_enabled; then target=false; else target=true; fi
+            ;;
+        *) err "Usage: vpsm cdn [on|off]" ;;
+    esac
+    if [[ $target == true ]] && cdn_enabled; then
+        msg "CDN node is already enabled"
+        return 0
+    fi
+    if [[ $target == false ]] && ! cdn_enabled; then
+        msg "CDN node is already disabled"
+        return 0
+    fi
+    if [[ $target == true ]]; then
+        extra_sub_assert_local_name "$(local_proxy_name)" || err "CDN node name conflicts with an external proxy name"
+    fi
+    db_snap=$(db_snapshot) || err "Failed to back up the database"
+    db_write --argjson en "$target" '.settings.cdn.enabled = $en'
+    if ! ( caddy_gen && xray_gen_config ); then
+        db_restore "$db_snap" || warn "Failed to restore the database"
+        db_rollback_runtime
+        err "Failed to apply CDN configuration"
+    fi
+    if xray_active && { ! xray_restart force || ! svc_settled "$XRAY_SVC"; }; then
+        db_restore "$db_snap" || warn "Failed to restore the database"
+        db_rollback_runtime
+        err "Xray failed to restart with the new CDN configuration"
+    fi
+    if ! ( sub_regen force ); then
+        db_restore "$db_snap" || warn "Failed to restore the database"
+        db_rollback_runtime
+        err "Subscriptions could not be regenerated with the new CDN configuration"
+    fi
+    caddy_reload || warn "Caddy reload failed after CDN change; run: vpsm regen"
+    rm -f "$db_snap"
+    if [[ $target == true ]]; then
+        ok "CDN node enabled: $(cdn_node_name) has been added to client subscriptions"
+    else
+        ok "CDN node disabled: removed from client subscriptions"
+    fi
+}
+
+set_cdn_domain() {
+    local d=${1:-} db_snap
+    if [[ -z $d || $d == 0 || $d == "default" ]]; then
+        d=""
+    else
+        valid_domain "$d" || err "Invalid domain: $d"
+    fi
+    db_snap=$(db_snapshot) || err "Failed to back up the database"
+    db_write --arg d "$d" '.settings.cdn.domain = $d'
+    if cdn_enabled; then
+        if ! ( caddy_gen && xray_gen_config && sub_regen force ); then
+            db_restore "$db_snap" || warn "Failed to restore the database"
+            db_rollback_runtime
+            err "Failed to apply CDN domain change"
+        fi
+        caddy_reload || warn "Caddy reload failed after CDN domain change"
+    else
+        sub_regen force || true
+    fi
+    rm -f "$db_snap"
+    if [[ -n $d ]]; then
+        ok "CDN domain set to: $d"
+    else
+        ok "CDN domain reset to default (follows main domain: $(db_get '.settings.domain'))"
+    fi
+}
+
+set_cdn_server() {
+    local s=${1:-} db_snap
+    if [[ -z $s || $s == 0 || $s == "default" ]]; then
+        s=""
+    fi
+    db_snap=$(db_snapshot) || err "Failed to back up the database"
+    db_write --arg s "$s" '.settings.cdn.server = $s'
+    sub_regen force || {
+        db_restore "$db_snap" || warn "Failed to restore the database"
+        err "Failed to regenerate subscriptions"
+    }
+    rm -f "$db_snap"
+    if [[ -n $s ]]; then
+        ok "CDN server/preferred IP set to: $s"
+    else
+        ok "CDN server reset to default (follows CDN domain: $(cdn_domain))"
+    fi
+}
+
+set_cdn_port() {
+    local p=${1:-} db_snap
+    if [[ -z $p || $p == 0 || $p == "default" ]]; then
+        p=443
+    fi
+    valid_port "$p" || err "Usage: vpsm cdn port <1-65535> (typically 443, 8443, 2053, 2083, 2087, 2096)"
+    p=$((10#$p))
+    db_snap=$(db_snapshot) || err "Failed to back up the database"
+    db_write --argjson p "$p" '.settings.cdn.port = $p'
+    sub_regen force || {
+        db_restore "$db_snap" || warn "Failed to restore the database"
+        err "Failed to regenerate subscriptions"
+    }
+    rm -f "$db_snap"
+    ok "CDN port set to: $p"
+}
+
+set_cdn_path() {
+    local p=${1:-} db_snap
+    if [[ -z $p || $p == 0 || $p == "default" ]]; then
+        p="/vless-ws"
+    fi
+    [[ $p == /* ]] || p="/$p"
+    [[ $p =~ ^/[A-Za-z0-9/_.-]+$ ]] || err "Invalid WebSocket path: $p"
+    db_snap=$(db_snapshot) || err "Failed to back up the database"
+    db_write --arg p "$p" '.settings.cdn.path = $p'
+    if cdn_enabled; then
+        if ! ( caddy_gen && xray_gen_config && sub_regen force ); then
+            db_restore "$db_snap" || warn "Failed to restore the database"
+            db_rollback_runtime
+            err "Failed to apply CDN path change"
+        fi
+        if xray_active && { ! xray_restart force || ! svc_settled "$XRAY_SVC"; }; then
+            db_restore "$db_snap" || warn "Failed to restore the database"
+            db_rollback_runtime
+            err "Xray failed to restart with the new path"
+        fi
+        caddy_reload || warn "Caddy reload failed after CDN path change"
+    else
+        sub_regen force || true
+    fi
+    rm -f "$db_snap"
+    ok "CDN WebSocket path set to: $p"
+}
+
+cdn_cmd() {
+    case ${1:-status} in
+        on | enable) set_cdn_status true ;;
+        off | disable) set_cdn_status false ;;
+        domain) shift; set_cdn_domain "$@" ;;
+        server | ip) shift; set_cdn_server "$@" ;;
+        port) shift; set_cdn_port "$@" ;;
+        path) shift; set_cdn_path "$@" ;;
+        status | info | "") show_cdn_info ;;
+        *) err "Usage: vpsm cdn [on|off|domain|server|port|path|status]" ;;
+    esac
 }

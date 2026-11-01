@@ -95,6 +95,7 @@ proxies:
       public-key: __PBK__
       short-id: __SID__
       support-x25519mlkem768: __MLKEM__
+  # __CDN_PROXY__
   # __EXTRA_PROXIES__
 
 proxy-groups:
@@ -102,6 +103,7 @@ proxy-groups:
     type: select
     proxies:
       - "__NODE__"
+      # __CDN_NAME__
       # __EXTRA_NAMES__
       - DIRECT
   - name: AI
@@ -109,6 +111,7 @@ proxy-groups:
     proxies:
       - Proxy
       - "__NODE__"
+      # __CDN_NAME__
       # __EXTRA_NAMES__
       - DIRECT
   - name: Google
@@ -116,6 +119,7 @@ proxy-groups:
     proxies:
       - Proxy
       - "__NODE__"
+      # __CDN_NAME__
       # __EXTRA_NAMES__
       - DIRECT
   - name: Steam
@@ -124,6 +128,7 @@ proxy-groups:
       - Proxy
       - DIRECT
       - "__NODE__"
+      # __CDN_NAME__
       # __EXTRA_NAMES__
   - name: Final
     type: select
@@ -137,6 +142,7 @@ proxy-groups:
     interval: 300
     proxies:
       - "__NODE__"
+      # __CDN_NAME__
       # __EXTRA_NAMES__
 
 # testingcf.jsdelivr.net is reachable from China without a proxy

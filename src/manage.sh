@@ -83,6 +83,17 @@ show_node_info() {
     echo "Profile name:    $(sub_name)"
     echo "Domain/port:     $(db_get '.settings.domain'):$(db_get '.settings.port')"
     echo "Reality:         configured (public key and shortId are available in client links)"
+    if cdn_enabled; then
+        echo "CDN node:        Enabled ($(cdn_node_name), port: $(cdn_port), path: $(cdn_path))"
+        if [[ $(cdn_domain) != "$(db_get '.settings.domain')" ]]; then
+            echo "CDN domain:      $(cdn_domain)"
+        fi
+        if [[ $(cdn_server) != "$(cdn_domain)" ]]; then
+            echo "CDN server:      $(cdn_server)"
+        fi
+    else
+        echo "CDN node:        Disabled"
+    fi
     echo "Users:           $(db_get '.users | length') ($(db_get '[.users[] | select(.enabled)] | length') enabled)"
     echo "Global expiry:   ${expire:-never}"
     echo "Next reset:      $(next_reset_date)"
@@ -108,6 +119,7 @@ show_status() {
     echo "Caddy version: $(cat "$BIN_DIR/caddy.version" 2>/dev/null || echo unknown)"
     echo "Domain/port:   $(db_get '.settings.domain'):$(db_get '.settings.port')"
     echo "Node name:     $(node_name)"
+    echo "CDN node:      $(if cdn_enabled; then echo "enabled ($(cdn_node_name))"; else echo "disabled"; fi)"
     echo "Users:         $(db_get '.users | length') ($(db_get '[.users[] | select(.enabled)] | length') enabled)"
     echo "Global expiry: ${expire:-never}"
     echo "Reset day:     day $(db_get '.settings.reset_day') of each month (next: $(next_reset_date))"
@@ -377,6 +389,7 @@ Subscriptions:
 Node:
   node [name|0]                     Show or set the local proxy name
   node port|domain|key|shortid      Configure the listener and Reality parameters
+  cdn [on|off|domain|server|port|path] Configure optional Cloudflare CDN node
   rules                             Edit custom Clash rules
   regen                             Regenerate all configs and subscriptions
 
