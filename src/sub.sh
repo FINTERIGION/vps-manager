@@ -31,7 +31,7 @@ sub_server_rules() {
 }
 
 sub_render_clash() {
-    local name=$1 uuid=$2 sf=$3 ef=${4:-} nf=${5:-} domain port pbk sid node mlkem
+    local name=$1 uuid=$2 sf=$3 ef=${4:-} nf=${5:-} domain port pbk sid node mlkem udp_val
     local cdn_on cdn_node cdn_server cdn_port cdn_sni cdn_host cdn_path
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
@@ -39,6 +39,7 @@ sub_render_clash() {
     sid=$(db_get '.settings.short_ids[0]')
     node=$(local_proxy_name)
     if xray_mlkem_ok; then mlkem=true; else mlkem=false; fi
+    if udp_enabled; then udp_val=true; else udp_val=false; fi
     if cdn_enabled; then
         cdn_on=true
         cdn_node=$(cdn_node_name)
@@ -53,6 +54,7 @@ sub_render_clash() {
     fi
     awk -v node="$node" -v server="$domain" -v port="$port" -v uuid="$uuid" \
         -v pbk="$pbk" -v sid="$sid" -v sni="$domain" -v user="$name" -v mlkem="$mlkem" \
+        -v udp="$udp_val" \
         -v cdnon="$cdn_on" -v cdnnode="$cdn_node" -v cdnserver="$cdn_server" \
         -v cdnport="$cdn_port" -v cdnsni="$cdn_sni" -v cdnhost="$cdn_host" -v cdnpath="$cdn_path" \
         -v cf="$CUSTOM_RULES" -v sf="$sf" -v ef="$ef" -v nf="$nf" '
@@ -88,7 +90,7 @@ sub_render_clash() {
                 print "    port: " cdnport
                 print "    uuid: " uuid
                 print "    network: ws"
-                print "    udp: true"
+                print "    udp: " udp
                 print "    tls: true"
                 print "    servername: " cdnsni
                 print "    client-fingerprint: chrome"
@@ -113,6 +115,7 @@ sub_render_clash() {
             $0 = rep($0, "__PBK__", pbk); $0 = rep($0, "__SID__", sid)
             $0 = rep($0, "__SNI__", sni); $0 = rep($0, "__USER__", user)
             $0 = rep($0, "__MLKEM__", mlkem)
+            $0 = rep($0, "__UDP__", udp)
             print
         }' "$SH_DIR/templates/clash.yaml"
 }

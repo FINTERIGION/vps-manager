@@ -99,6 +99,7 @@ show_node_info() {
     else
         echo "CDN node:        Disabled"
     fi
+    echo "UDP forwarding:  $(udp_enabled && echo Enabled || echo 'Disabled (pure TCP)')"
     echo "Users:           $(db_get '.users | length') ($(db_get '[.users[] | select(.enabled)] | length') enabled)"
     echo "Global expiry:   ${expire:-never}"
     echo "Next reset:      $(next_reset_date)"

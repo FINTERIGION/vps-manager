@@ -459,6 +459,36 @@ set_shortid() {
     ok "shortId updated to $sid (clients just need to refresh their subscription)"
 }
 
+set_udp() {
+    local val=${1:-}
+    case ${val,,} in
+        1 | on | true | enable | enabled) val=true ;;
+        0 | off | false | disable | disabled) val=false ;;
+        "")
+            if udp_enabled; then
+                val=false
+            else
+                val=true
+            fi
+            ;;
+        *) err "Usage: vpsm node udp [on|off]" ;;
+    esac
+    local db_snap
+    db_snap=$(db_snapshot) || err "Failed to back up the database"
+    db_write --argjson u "$val" '.settings.udp = $u'
+    if ! ( sub_regen force ); then
+        db_restore "$db_snap" || warn "Failed to restore the database"
+        db_rollback_runtime
+        err "UDP setting was not changed"
+    fi
+    rm -f "$db_snap"
+    if [[ $val == true ]]; then
+        ok "Node UDP proxy forwarding enabled in client subscriptions"
+    else
+        ok "Node UDP proxy forwarding disabled in client subscriptions (pure TCP mode)"
+    fi
+}
+
 regen_all() {
     xray_gen_config
     [[ -n $XRAY_CONF_CHANGED ]] && xray_active && xray_restart force

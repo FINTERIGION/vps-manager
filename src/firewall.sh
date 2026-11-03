@@ -98,6 +98,7 @@ fw_rules() {
     fi
     echo "-A $FW_CHAIN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
     echo "-A $FW_CHAIN -m conntrack --ctstate INVALID -j DROP"
+    [[ $v == 4 ]] && echo "-A $FW_CHAIN -p udp --sport 67 --dport 68 -j ACCEPT"
     [[ $v == 6 ]] && echo "-A $FW_CHAIN -s fe80::/10 -p udp --sport 547 --dport 546 -j ACCEPT"
     while read -r spec; do
         echo "-A $FW_CHAIN -p ${spec#*/} --dport $(tr - : <<<"${spec%/*}") -j ACCEPT"

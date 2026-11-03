@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.3.1"
+VPSM_VERSION="1.3.2"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -247,6 +247,7 @@ node_name() { db_get 'if (.settings.name // "") == "" then .settings.domain else
 local_proxy_name() { node_name; }
 cdn_node_name() { printf '%s [CDN]\n' "$(local_proxy_name)"; }
 cdn_enabled() { [[ $(db_get '.settings.cdn.enabled // false') == true ]]; }
+udp_enabled() { [[ $(db_get '.settings.udp != false') == true ]]; }
 cdn_domain() {
     local d
     d=$(db_get '.settings.cdn.domain // empty')

@@ -111,8 +111,9 @@ node_settings_menu() {
         echo "6) Set monthly reset day"
         echo "7) Rotate Reality key pair"
         echo "8) Change Reality shortId"
-        echo "9) Configure CDN node (Cloudflare WS)"
-        echo "0) Back"
+        echo " 9) Configure CDN node (Cloudflare WS)"
+        echo "10) Toggle UDP forwarding ($(udp_enabled && echo Enabled || echo Disabled))"
+        echo " 0) Back"
         a=$(ask "Choose: ")
         case $a in
             1) value=$(ask "Node name (0 = domain): "); run_locked set_node_name "$value" ;;
@@ -124,6 +125,7 @@ node_settings_menu() {
             7) run_locked set_key ;;
             8) value=$(ask "shortId (empty = random): "); run_locked set_shortid "$value" ;;
             9) cdn_menu; continue ;;
+            10) run_locked set_udp ;;
             0 | "") return 0 ;;
             *) continue ;;
         esac
@@ -390,6 +392,7 @@ node_cmd() {
         key) shift; set_key "$@" ;;
         shortid) shift; set_shortid "$@" ;;
         name) shift; set_node_name "$*" ;;
+        udp) shift; set_udp "$@" ;;
         cdn) shift; cdn_cmd "$@" ;;
         "") show_node_info ;;
         *) set_node_name "$*" ;;
@@ -432,6 +435,7 @@ main() {
         name) run_locked set_node_name "$*" ;;
         key) run_locked set_key "$@" ;;
         shortid) run_locked set_shortid "$@" ;;
+        udp) run_locked set_udp "$@" ;;
         rules) edit_rules ;;
         fv | futures-view) run_locked fv_cmd "$@" ;;
         regen) run_locked regen_all ;;

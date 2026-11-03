@@ -71,7 +71,16 @@ xray_gen_config() {
                sniffing: {enabled: true, destOverride: ["http", "tls"], routeOnly: true}}
             ] else [] end)
           ),
-          dns: {servers: ["localhost"], queryStrategy: "UseIPv4"},
+          dns: {
+            servers: [
+              "https+local://1.1.1.1/dns-query",
+              "https+local://8.8.8.8/dns-query",
+              "tcp+local://1.1.1.1:53",
+              "tcp+local://8.8.8.8:53",
+              "localhost"
+            ],
+            queryStrategy: "UseIPv4"
+          },
           outbounds: [
             {tag: "direct", protocol: "freedom",
              streamSettings: {sockopt: {domainStrategy: "ForceIPv4"}}},
@@ -82,6 +91,7 @@ xray_gen_config() {
             {type: "field", inboundTag: ([$tag] + (if $cdnenabled then ["vless-ws"] else [] end)), port: "\($apiport)", outboundTag: "block"},
             {type: "field", protocol: ["bittorrent"], outboundTag: "block"},
             {type: "field", port: "25", outboundTag: "block"},
+            {type: "field", network: "udp", port: "443", outboundTag: "block"},
             {type: "field", ip: (["geoip:private", "geoip:cn"] + $selfips), outboundTag: "block"}
           ]}
         }' "$DB" >"$tmp"; then

@@ -110,8 +110,20 @@ assert_file_contains "$alice_yaml" "name: \"node.example.com\"" "local VLESS nod
 assert_file_contains "$alice_yaml" "- MATCH,Final" "original final Clash rule is retained"
 assert_success "generated Clash YAML is valid" python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))' "$alice_yaml"
 assert_file_contains "$XRAY_CONF" '"queryStrategy": "UseIPv4"' "Xray DNS defaults to IPv4"
+assert_file_contains "$XRAY_CONF" "https+local://1.1.1.1/dns-query" "Xray DNS includes DoH fallback"
+assert_file_contains "$XRAY_CONF" '"network": "udp"' "Xray routing matches UDP network"
 assert_file_contains "$XRAY_CONF" '"domainStrategy": "ForceIPv4"' "Xray outbound defaults to IPv4"
 assert_file_contains "$alice_yaml" "ip-version: ipv4" "Clash node defaults to IPv4"
+assert_file_contains "$alice_yaml" "AND,((DST-PORT,443),(NETWORK,UDP)),REJECT" "Clash rules reject QUIC"
+assert_file_contains "$alice_yaml" "udp: true" "Clash node defaults to udp: true"
+
+set_udp false
+assert_file_contains "$alice_yaml" "udp: false" "set_udp false generates udp: false in Clash YAML"
+assert_eq "false" "$(udp_enabled && echo true || echo false)" "udp_enabled reports false"
+
+set_udp true
+assert_file_contains "$alice_yaml" "udp: true" "set_udp true restores udp: true"
+assert_eq "true" "$(udp_enabled && echo true || echo false)" "udp_enabled reports true"
 
 db_write '.users |= map(if .name == "alice" then .up = 12345 else . end)'
 sub_regen
@@ -325,6 +337,7 @@ assert_eq 53/udp "$(fw_parse_spec 53/udp)" "firewall port parser supports UDP"
 assert_eq 10000-20000/tcp "$(fw_parse_spec 10000-20000)" "firewall range parser applies TCP default"
 fw_rules 4 >"$TMP/fw.rules"
 assert_file_contains "$TMP/fw.rules" ":VPSM-IN" "firewall uses a dedicated input chain"
+assert_file_contains "$TMP/fw.rules" "-p udp --sport 67 --dport 68 -j ACCEPT" "firewall allows IPv4 DHCP"
 assert_file_contains "$TMP/fw.rules" "--dport 443" "firewall allows the Xray port"
 assert_file_contains "$TMP/fw.rules" "RELATED,ESTABLISHED" "firewall preserves established connections"
 fw_guard_rules >"$TMP/fw-guard.rules"

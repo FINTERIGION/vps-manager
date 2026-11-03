@@ -85,7 +85,7 @@ proxies:
     port: __PORT__
     uuid: __UUID__
     network: tcp
-    udp: true
+    udp: __UDP__
     ip-version: ipv4
     tls: true
     flow: xtls-rprx-vision
@@ -256,6 +256,7 @@ rules:
   # Server addresses go direct because the Xray server blocks proxied connections to itself
   # __SERVER_RULES__
   - DST-PORT,853,REJECT
+  - AND,((DST-PORT,443),(NETWORK,UDP)),REJECT
   - IP-CIDR,8.8.8.8/32,Proxy,no-resolve
   - IP-CIDR,8.8.4.4/32,Proxy,no-resolve
   - IP-CIDR,1.1.1.1/32,Proxy,no-resolve
