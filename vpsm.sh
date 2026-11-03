@@ -5,7 +5,7 @@ set -o pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 # shellcheck source=src/core.sh
 . "$(dirname "$SELF")/src/core.sh"
-for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
     # shellcheck disable=SC1090
     . "$SH_DIR/src/$_lib.sh"
 done
@@ -277,13 +277,14 @@ menu() {
     )
     declare -a system=(
         "10) Service status and logs"
-        "11) Update Xray / Caddy"
-        "12) Update scripts"
-        "13) Update system packages and kernel"
-        "14) Enable BBR"
-        "15) Sync traffic and status now"
-        "16) Manage FuturesView panel"
-        "17) Uninstall vpsm"
+        "11) Check disguise health"
+        "12) Update Xray / Caddy"
+        "13) Update scripts"
+        "14) Update system packages and kernel"
+        "15) Enable BBR"
+        "16) Sync traffic and status now"
+        "17) Manage FuturesView panel"
+        "18) Uninstall vpsm"
         " 0) Exit"
     )
     width=$(menu_width "${security[@]}" "${node[@]}" "${system[@]}")
@@ -309,13 +310,14 @@ menu() {
             8) subscription_menu ;;
             9) edit_rules ;;
             10) services_menu; continue ;;
-            11) core_update_menu; continue ;;
-            12) run_locked update_sh && exec "$ROOT/sh/vpsm.sh" ;;
-            13) run_locked update_kernel ;;
-            14) enable_bbr ;;
-            15) run_locked sync_all; ok "Traffic and status synchronized" ;;
-            16) futures_view_menu; continue ;;
-            17) run_locked do_uninstall; [[ -f $DB ]] || exit 0 ;;
+            11) node_check ;;
+            12) core_update_menu; continue ;;
+            13) run_locked update_sh && exec "$ROOT/sh/vpsm.sh" ;;
+            14) run_locked update_kernel ;;
+            15) enable_bbr ;;
+            16) run_locked sync_all; ok "Traffic and status synchronized" ;;
+            17) futures_view_menu; continue ;;
+            18) run_locked do_uninstall; [[ -f $DB ]] || exit 0 ;;
             0 | q | Q) exit 0 ;;
             *) continue ;;
         esac
@@ -405,6 +407,9 @@ main() {
         regen) run_locked regen_all ;;
         sync) run_locked sync_all ;;
         status | s) show_status ;;
+        # Read-only, so deliberately not run_locked: it must stay usable while a
+        # sync is in progress and must never contend for the lock.
+        check) node_check ;;
         start) run_locked svc_start "$@" ;;
         stop) run_locked svc_stop "$@" ;;
         restart) run_locked svc_restart "$@" ;;

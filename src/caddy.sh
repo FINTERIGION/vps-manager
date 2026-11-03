@@ -2,7 +2,49 @@
 # vpsm - Caddy config (Reality dest + subscription server)
 
 CADDY_OLD_INDEX='<h1>It works!</h1><p>This site is under construction.</p>'
+# The fixed sentences caddy_gen_index emits. They live in one place because
+# caddy_index_is_placeholder matches on them to detect a fallback page that has
+# silently degraded to a generated placeholder.
+CADDY_PLACEHOLDER_LEADS=(
+    "A new site is on its way."
+    "Something new is coming soon."
+    "We are rebuilding this site."
+    "This page is being redesigned."
+)
+CADDY_PLACEHOLDER_TAILS=(
+    "Please check back in a few weeks."
+    "Thanks for your patience."
+    "The new content will be available shortly."
+)
+# 16x16 RGBA PNG inside a single-entry ICO container (104 bytes), inlined so the
+# repository carries no binary file.
+CADDY_FAVICON_B64='AAABAAEAEBAAAAEAIABSAAAAFgAAAIlQTkcNChoKAAAADUlIRFIAAAAQAAAAEAgGAAAAH/P/YQAA
+ABlJREFUeNpjsPJL+08JZhg1YNSAUQOGiwEAcyjtEFqGvIMAAAAASUVORK5CYII='
 rand_pick() { printf '%s\n' "$@" | shuf -n "${PICK_N:-1}"; }
+
+caddy_index_is_placeholder() {
+    local f=${1:-$WWW_DIR/index.html} line
+    [[ -f $f ]] || return 1
+    grep -qF "$CADDY_OLD_INDEX" "$f" && return 0
+    for line in "${CADDY_PLACEHOLDER_LEADS[@]}" "${CADDY_PLACEHOLDER_TAILS[@]}"; do
+        grep -qF "$line" "$f" && return 0
+    done
+    return 1
+}
+
+# Browsers ask for /favicon.ico and a 404 there is a cheap tell for a site that
+# was never really built. Only created when absent, so a favicon shipped by the
+# fallback site itself is never overwritten.
+caddy_gen_favicon() {
+    [[ -f $WWW_DIR/favicon.ico ]] && return 0
+    if ! base64 -d >"$WWW_DIR/favicon.ico" <<<"$CADDY_FAVICON_B64"; then
+        rm -f "$WWW_DIR/favicon.ico"
+        warn "Failed to write $WWW_DIR/favicon.ico"
+        return 1
+    fi
+    chmod 644 "$WWW_DIR/favicon.ico"
+    return 0
+}
 
 caddy_gen_index() {
     local title hue font width body year
@@ -14,8 +56,8 @@ caddy_gen_index() {
         "Verdana, Geneva, sans-serif" "'Segoe UI', sans-serif" "'Trebuchet MS', sans-serif")
     year=$(date +%Y)
     body="<h1>$title</h1>
-<p>$(rand_pick "A new site is on its way." "Something new is coming soon." "We are rebuilding this site." "This page is being redesigned.")</p>
-<p>$(rand_pick "Please check back in a few weeks." "Thanks for your patience." "The new content will be available shortly.")</p>"
+<p>$(rand_pick "${CADDY_PLACEHOLDER_LEADS[@]}")</p>
+<p>$(rand_pick "${CADDY_PLACEHOLDER_TAILS[@]}")</p>"
     cat <<EOF
 <!DOCTYPE html>
 <html lang="en">
@@ -77,9 +119,13 @@ caddy_gen() {
     svc_dir "$CADDY_USERS"
 
     if [[ ! -f $WWW_DIR/index.html ]] || grep -qF "$CADDY_OLD_INDEX" "$WWW_DIR/index.html"; then
+        if fv_enabled; then
+            warn "FuturesView is enabled but $WWW_DIR/index.html is missing or stale, so a generated placeholder is being served (run: vpsm fv update)"
+        fi
         caddy_gen_index >"$WWW_DIR/index.html"
         chmod 644 "$WWW_DIR/index.html"
     fi
+    caddy_gen_favicon
 
     if fv_enabled; then
         fv_handle="	handle /api/* {

@@ -11,7 +11,11 @@ install_units() {
     for u in "${units[@]}"; do
         dst=/etc/systemd/system/$u
         [[ -f $SH_DIR/systemd/$u ]] || continue
-        new=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/$u")
+        if [[ $u == "vpsm-futures-view.service" ]] && declare -F fv_render_unit >/dev/null; then
+            new=$(fv_render_unit)
+        else
+            new=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/$u")
+        fi
         [[ -f $dst && $(<"$dst") == "$new" ]] && continue
         printf '%s\n' "$new" >"$dst"
         UNITS_CHANGED+=" $u"
@@ -124,6 +128,7 @@ show_status() {
     echo "Xray version:  ${ver:-unknown}"
     echo "Caddy version: $(cat "$BIN_DIR/caddy.version" 2>/dev/null || echo unknown)"
     echo "FuturesView:   $([[ -d $FV_DIR/.git ]] && echo "installed ($(fv_enabled && echo "enabled" || echo "disabled"))" || echo "not installed")"
+    echo "TLS cert:      $(cert_summary)"
     echo "Domain/port:   $(db_get '.settings.domain'):$(db_get '.settings.port')"
     echo "Node name:     $(node_name)"
     echo "Users:         $(db_get '.users | length') ($(db_get '[.users[] | select(.enabled)] | length') enabled)"
@@ -409,9 +414,10 @@ Security:
 System:
   sync                              Sync traffic, quota and expiry now
   status                            Show service and security status
+  check                             Probe the fallback site the way a censor does
   start|stop|restart [xray|caddy|fv|all]
   log [xray|caddy|fv|sync]
-  fv [deploy|update|status|password|restart|log|remove] Manage FuturesView web panel
+  fv [deploy|update|status|password|cpu|restart|log|remove] Manage FuturesView web panel
   update [core|caddy|sh|all]        Update components and scripts, not the kernel
   kernel [-y]                       Update system packages and kernel safely
   bbr                               Enable BBR

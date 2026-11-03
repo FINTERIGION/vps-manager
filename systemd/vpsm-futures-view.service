@@ -10,9 +10,26 @@ WorkingDirectory=@ROOT@/futures-view
 Environment=FT_WEB_ALLOWED_HOSTS=127.0.0.1,localhost,@DOMAIN@
 Environment=FT_WEB_ALLOWED_ORIGINS=https://@DOMAIN@,http://@DOMAIN@
 ExecStart=@ROOT@/futures-view/.venv/bin/python main.py web --host 127.0.0.1 --port @PORT@
+# Hardening that leaves every filesystem write path untouched, so backtesting is
+# unaffected. Dropping to a non-root user with ProtectSystem=strict is deferred
+# until the panel's runtime write paths are mapped on a real deployment; the
+# capability set is left alone for the same reason.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
+@FV_CPU_OPTS@
 
 [Install]
 WantedBy=multi-user.target

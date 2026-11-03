@@ -135,6 +135,7 @@ sync_all() {
         caddy_reload || warn "Caddy reload failed; it will be retried on the next sync"
     fi
     extra_sub_refresh all || warn "Some external subscriptions could not be refreshed; cached nodes were kept"
+    cert_check_throttled
     snap=$(state_snapshot)
     apply_state "$snap"
 }

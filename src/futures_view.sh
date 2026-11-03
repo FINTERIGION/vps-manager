@@ -3,16 +3,26 @@
 
 fv_gen_password() {
     local pass=""
+    # 256 bytes of urandom yield about 62 alphanumeric characters, so the
+    # 20-character target is always met. 64 bytes reached it only ~13% of the
+    # time and silently fell through to the weaker paths below.
     if [[ -r /dev/urandom ]]; then
-        pass=$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 20)
+        pass=$(head -c 256 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 20)
     fi
     if ((${#pass} < 16)) && command -v openssl >/dev/null 2>&1; then
-        pass=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
+        pass=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 20)
     fi
+    # Deliberately no timestamp/$RANDOM fallback: the panel login is reachable
+    # through the public /api/* proxy, so a guessable password would hand over
+    # the very site that is supposed to be the disguise. Returns non-zero rather
+    # than calling err(), because callers use a command substitution and an
+    # exit inside it would only kill the subshell, yielding an empty password.
     if ((${#pass} < 16)); then
-        pass="Fv$(date +%s)$RANDOM"
+        warn "Cannot generate a strong password: neither /dev/urandom nor openssl produced enough entropy"
+        return 1
     fi
     printf '%s\n' "$pass"
+    return 0
 }
 
 fv_apply_password() {
@@ -29,11 +39,33 @@ fv_get_password() {
     db_get '.settings.futures_view.password // ""'
 }
 
+fv_cpu_limit() {
+    db_get 'if (.settings.futures_view.cpu_limit // null) != null and .settings.futures_view.cpu_limit != "" then .settings.futures_view.cpu_limit else 60 end'
+}
+
+fv_render_unit() {
+    local domain port cpu_limit cpu_opts="" content
+    domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
+    port=$(fv_port 2>/dev/null || echo "8888")
+    cpu_limit=$(fv_cpu_limit 2>/dev/null || echo "60")
+    if [[ $cpu_limit =~ ^[1-9][0-9]*$ && $cpu_limit -gt 0 ]]; then
+        cpu_opts=$(printf 'CPUQuota=%s%%\nNice=15' "$cpu_limit")
+    fi
+    content=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/vpsm-futures-view.service")
+    if [[ -n $cpu_opts ]]; then
+        content="${content//@FV_CPU_OPTS@/$cpu_opts}"
+    else
+        content=$(printf '%s\n' "$content" | grep -v '@FV_CPU_OPTS@')
+    fi
+    printf '%s\n' "$content"
+}
+
 fv_status() {
-    local state pid rss="-" domain port pwd
+    local state pid rss="-" domain port pwd cpu_lim
     domain=$(db_get '.settings.domain')
     port=$(fv_port)
     pwd=$(fv_get_password)
+    cpu_lim=$(fv_cpu_limit)
     echo "=== FuturesView Panel Status ==="
     echo "Enabled:       $(fv_enabled && echo "yes" || echo "no")"
     echo "Repository:    $FV_DIR $([[ -d $FV_DIR/.git ]] && echo "(git $(git -C "$FV_DIR" rev-parse --short HEAD 2>/dev/null || echo "cloned"))" || echo "(not cloned)")"
@@ -46,6 +78,11 @@ fv_status() {
                 rss="$(($(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ') / 1024)) MB"
         fi
         echo "Service state: $state (memory: $rss)"
+    fi
+    if [[ $cpu_lim =~ ^[1-9][0-9]*$ && $cpu_lim -gt 0 ]]; then
+        echo "CPU limit:     ${cpu_lim}% (Nice=15, low priority)"
+    else
+        echo "CPU limit:     Disabled (unlimited)"
     fi
     echo "Listen addr:   127.0.0.1:$port"
     echo "WebUI URL:     https://$domain"
@@ -122,11 +159,11 @@ fv_deploy() {
 
     msg "Installing FuturesView dependencies with pip ..."
     "$FV_DIR/.venv/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
-    if ! "$FV_DIR/.venv/bin/pip" install -e "$FV_DIR[web]"; then
+    if ! "$FV_DIR/.venv/bin/pip" install -e "${FV_DIR}[web]"; then
         err "Failed to install Python dependencies for FuturesView"
     fi
 
-    pass=$(fv_gen_password)
+    pass=$(fv_gen_password) || err "Failed to generate a WebUI password"
     msg "Configuring high-strength WebUI password ..."
     if ! fv_apply_password "$pass"; then
         warn "Could not automatically apply password via web.auth, setting in database"
@@ -151,7 +188,7 @@ fv_deploy() {
         chmod -R 755 "$WWW_DIR"
     fi
 
-    db_write '.settings.futures_view.enabled = true'
+    db_write '.settings.futures_view.enabled = true | if (.settings.futures_view.cpu_limit // null) == null then .settings.futures_view.cpu_limit = 60 else . end'
 
     install_units
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
@@ -165,6 +202,8 @@ fv_deploy() {
 
     domain=$(db_get '.settings.domain')
     port=$(fv_port)
+    local cpu_lim
+    cpu_lim=$(fv_cpu_limit)
 
     cat <<EOF
 
@@ -172,13 +211,15 @@ fv_deploy() {
 WebUI URL:      https://$domain
 Camouflage:     Active (serving FuturesView SPA on 443)
 API Reverse:    https://$domain/api/* -> 127.0.0.1:$port
+CPU Limit:      ${cpu_lim}% (Nice=15, protects proxy latency)
 WebUI Password: $pass
 Service:        $FV_SVC
 
 Notes:
  1. Access the web panel at https://$domain and unlock it using the password above.
  2. To change or view the password later, run: vpsm fv password
- 3. To update FuturesView after repository changes, run: vpsm fv update
+ 3. To configure CPU rate limiting, run: vpsm fv cpu
+ 4. To update FuturesView after repository changes, run: vpsm fv update
 =================================================================
 EOF
 }
@@ -199,7 +240,7 @@ fv_update() {
 
     msg "Updating Python dependencies ..."
     if [[ -x $FV_DIR/.venv/bin/pip ]]; then
-        "$FV_DIR/.venv/bin/pip" install -e "$FV_DIR[web]" || warn "pip install encountered issues"
+        "$FV_DIR/.venv/bin/pip" install -e "${FV_DIR}[web]" || warn "pip install encountered issues"
     fi
 
     msg "Rebuilding frontend assets ..."
@@ -243,7 +284,7 @@ fv_set_password_cmd() {
         echo "0) Cancel"
         choice=$(ask "Choose: ")
         case $choice in
-            1) new_p=$(fv_gen_password) ;;
+            1) new_p=$(fv_gen_password) || return 1 ;;
             2)
                 if [[ -t 0 ]]; then
                     read -r -s -p "New password (8-256 characters): " new_p
@@ -270,6 +311,73 @@ fv_set_password_cmd() {
     fi
 }
 
+fv_set_cpu_limit_cmd() {
+    need_root
+    need_installed
+    local val=${1:-}
+    if [[ -z $val ]]; then
+        local curr choice
+        curr=$(fv_cpu_limit)
+        if [[ $curr =~ ^[1-9][0-9]*$ && $curr -gt 0 ]]; then
+            echo "Current CPU limit: ${curr}% (Nice=15, low scheduling priority)"
+        else
+            echo "Current CPU limit: Disabled (unlimited CPU)"
+        fi
+        echo
+        echo "1) Set CPU limit to 60% (Recommended for 1C1G: preserves proxy performance)"
+        echo "2) Enter custom CPU limit percentage (e.g. 50% / 70% / 80%)"
+        echo "3) Disable CPU limit (allow 100% CPU usage)"
+        echo "0) Cancel"
+        choice=$(ask "Choose: ")
+        case $choice in
+            1) val=60 ;;
+            2)
+                val=$(ask "Enter CPU limit percentage (5-1000%): ")
+                [[ -z $val ]] && return 0
+                ;;
+            3) val=0 ;;
+            *) return 0 ;;
+        esac
+    fi
+
+    val=${val%%%}
+    case ${val,,} in
+        status | show)
+            local curr
+            curr=$(fv_cpu_limit)
+            if [[ $curr =~ ^[1-9][0-9]*$ && $curr -gt 0 ]]; then
+                echo "FuturesView CPU limit: ${curr}% (Nice=15)"
+            else
+                echo "FuturesView CPU limit: Disabled (unlimited)"
+            fi
+            return 0
+            ;;
+        off | disable | disabled | 0 | none | unlimited)
+            val=0
+            ;;
+        *)
+            if ! [[ $val =~ ^[1-9][0-9]*$ ]] || ((val < 5 || val > 1000)); then
+                err "Invalid CPU limit: $val (must be a percentage between 5 and 1000, or '0' / 'off')"
+            fi
+            ;;
+    esac
+
+    db_write --argjson c "$val" '.settings.futures_view.cpu_limit = $c'
+    install_units
+    if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
+        systemctl daemon-reload
+        if svc_active "$FV_SVC"; then
+            systemctl restart "$FV_SVC" || warn "Failed to restart $FV_SVC with new CPU limit"
+        fi
+    fi
+
+    if ((val > 0)); then
+        ok "FuturesView CPU limit configured: ${val}% (Nice=15)"
+    else
+        ok "FuturesView CPU limit disabled (unlimited CPU)"
+    fi
+}
+
 fv_remove() {
     need_root
     need_installed
@@ -293,7 +401,7 @@ fv_remove() {
 }
 
 futures_view_menu() {
-    local a state
+    local a state cpu_lim cpu_desc
     while true; do
         cls
         state="Not deployed"
@@ -305,24 +413,32 @@ futures_view_menu() {
         elif [[ -d $FV_DIR ]]; then
             state="Installed (disabled)"
         fi
+        cpu_lim=$(fv_cpu_limit)
+        if [[ $cpu_lim =~ ^[1-9][0-9]*$ && $cpu_lim -gt 0 ]]; then
+            cpu_desc="${cpu_lim}% (Nice=15)"
+        else
+            cpu_desc="Unlimited"
+        fi
         echo "=== FuturesView Panel ==="
         echo "Status: $state"
         echo
         echo "1) Deploy FuturesView (with auto-generated password)"
         echo "2) Update and rebuild (git pull + npm build)"
         echo "3) View / Change WebUI password"
-        echo "4) Show status and logs"
-        echo "5) Restart service"
-        echo "6) Disable / Remove"
+        echo "4) Configure CPU rate limit (current: $cpu_desc)"
+        echo "5) Show status and logs"
+        echo "6) Restart service"
+        echo "7) Disable / Remove"
         echo "0) Back"
         a=$(ask "Choose: ")
         case $a in
             1) run_locked fv_deploy ;;
             2) run_locked fv_update ;;
             3) run_locked fv_set_password_cmd ;;
-            4) fv_status; echo; show_log fv ;;
-            5) run_locked svc_restart fv ;;
-            6) run_locked fv_remove ;;
+            4) run_locked fv_set_cpu_limit_cmd ;;
+            5) fv_status; echo; show_log fv ;;
+            6) run_locked svc_restart fv ;;
+            7) run_locked fv_remove ;;
             0 | "") return 0 ;;
             *) continue ;;
         esac
@@ -336,12 +452,13 @@ fv_cmd() {
         update | upgrade) shift; fv_update "$@" ;;
         status | s) shift; fv_status "$@" ;;
         password | pwd | pass) shift; fv_set_password_cmd "$@" ;;
+        cpu | cpulimit | limit) shift; fv_set_cpu_limit_cmd "$@" ;;
         restart) shift; svc_restart fv ;;
         start) shift; svc_start fv ;;
         stop) shift; svc_stop fv ;;
         log) shift; show_log fv ;;
         remove | disable | del) shift; fv_remove "$@" ;;
-        *) err "Usage: vpsm fv [deploy|update|status|password|restart|log|remove]" ;;
+        *) err "Usage: vpsm fv [deploy|update|status|password|cpu|restart|log|remove]" ;;
     esac
 }
 

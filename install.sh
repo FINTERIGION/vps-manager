@@ -75,7 +75,7 @@ ask() {
 
 install_deps() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
-    local required=(curl jq unzip tar flock timeout cmp diff ip ss python3) need=() c pm iproute=iproute2
+    local required=(curl jq unzip tar flock timeout cmp diff ip ss python3 shuf od base64) need=() c pm iproute=iproute2
     for c in "${required[@]}" qrencode iptables; do
         command -v "$c" >/dev/null 2>&1 || need+=("$c")
     done
@@ -92,7 +92,7 @@ install_deps() {
     for p in "${need[@]}"; do
         case $p in
             flock) p=util-linux ;;
-            timeout) p=coreutils ;;
+            timeout | shuf | od | base64) p=coreutils ;;
             cmp | diff) p=diffutils ;;
             ip | ss) p=$iproute ;;
             pyyaml) [[ $pm == apt-get ]] && p=python3-yaml || p=python3-pyyaml ;;
@@ -160,7 +160,7 @@ echo "$REPO $REF" >"$VPSM_ROOT/repo"
 chmod 600 "$VPSM_ROOT/repo"
 # shellcheck disable=SC1091
 . "$VPSM_ROOT/sh/src/core.sh"
-for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
     # shellcheck disable=SC1090
     . "$SH_DIR/src/$_lib.sh"
 done

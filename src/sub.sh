@@ -101,9 +101,27 @@ handle /sub/$token {
 EOF
 }
 
+# A structural change is one Caddy must reload for: the route set changed, or a
+# route changed in anything other than its subscription-userinfo header.
+sub_struct_differs() {
+    local stage=$1 live=$2 f b
+    [[ -d $live ]] || return 0
+    if [[ $(cd "$stage" && printf '%s\n' *.conf | sort) != $(cd "$live" && printf '%s\n' *.conf | sort) ]]; then
+        return 0
+    fi
+    for f in "$stage"/*.conf; do
+        [[ -e $f ]] || continue
+        b=${f##*/}
+        [[ -e $live/$b ]] || return 0
+        diff -q <(grep -v 'subscription-userinfo' "$f") \
+            <(grep -v 'subscription-userinfo' "$live/$b") >/dev/null || return 0
+    done
+    return 1
+}
+
 sub_regen() {
     local force=${1:-} age stage changed="" full="" reload_pending="" f b fname expire
-    local name uuid token quota up down yamls=()
+    local name uuid token quota up down yamls=() any="" struct=""
     if [[ -n $force || ! -f $SUB_STAMP ]]; then
         full=1
     else
@@ -164,14 +182,26 @@ PY
         fi
     fi
 
-    if ! diff -rq "$stage/users" "$CADDY_USERS" >/dev/null 2>&1; then
-        changed=1
-        rm -rf "$CADDY_USERS"
+    diff -rq "$stage/users" "$CADDY_USERS" >/dev/null 2>&1 || any=1
+    if [[ -n $any ]]; then
+        sub_struct_differs "$stage/users" "$CADDY_USERS" && struct=1
+        # Incremental sync instead of rm -rf: the route directory is never empty,
+        # so an unrelated Caddy restart cannot land in a window with no routes.
         svc_dir "$CADDY_USERS"
         for f in "$stage"/users/*.conf; do
             [[ -e $f ]] || continue
-            install -m 644 "$f" "$CADDY_USERS/${f##*/}" ||
+            b=${f##*/}
+            cmp -s "$f" "$CADDY_USERS/$b" && continue
+            # Write to a temp name then rename, so Caddy never reads a partial
+            # file. The temp name does not match the "*.conf" import glob.
+            install -m 644 "$f" "$CADDY_USERS/.$b.tmp" ||
                 { rm -rf "$stage"; warn "Failed to install the subscription info"; return 1; }
+            mv -f "$CADDY_USERS/.$b.tmp" "$CADDY_USERS/$b" ||
+                { rm -rf "$stage"; warn "Failed to install the subscription info"; return 1; }
+        done
+        for f in "$CADDY_USERS"/*.conf; do
+            [[ -e $f ]] || continue
+            [[ -e $stage/users/${f##*/} ]] || rm -f "$f"
         done
     fi
 
@@ -192,6 +222,19 @@ PY
         touch "$SUB_STAMP"
     fi
     rm -rf "$stage"
+
+    # Decouple "route files changed" from "Caddy must reload": the userinfo header
+    # moves on every traffic tick, but clients only re-read it every 12h, so a
+    # userinfo-only change is reloaded at most once per SUB_INFO_REFRESH window.
+    if [[ -n $force || -n $struct ]]; then
+        changed=1
+    elif [[ -n $any ]]; then
+        if [[ ! -f $SUB_INFO_STAMP ]] ||
+            (($(date +%s) - $(stat -c %Y "$SUB_INFO_STAMP") >= SUB_INFO_REFRESH)); then
+            changed=1
+        fi
+    fi
+    [[ -n $changed ]] && touch "$SUB_INFO_STAMP"
 
     if [[ -n $changed || -n $reload_pending ]]; then
         if ! caddy_reload; then

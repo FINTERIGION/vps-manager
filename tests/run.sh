@@ -57,7 +57,7 @@ printf '# test fstab\n' >"$VPSM_FSTAB"
 
 # shellcheck disable=SC1091
 . "$PROJECT/src/core.sh"
-for lib in xray traffic extra_sub sub caddy user firewall security manage; do
+for lib in xray traffic extra_sub sub caddy user firewall security manage check; do
     # shellcheck disable=SC1090
     . "$PROJECT/src/$lib.sh"
 done
@@ -130,6 +130,67 @@ sub_regen
 assert_file_contains "$CADDY_USERS/alice.conf" "upload=12345" "subscription info refreshes without full regeneration"
 db_write '.users |= map(if .name == "alice" then .up = 0 else . end)'
 sub_regen
+
+# The subscription-userinfo header moves on every traffic tick, but clients only
+# re-read it every 12h, so a userinfo-only change must not reload Caddy each time.
+RELOAD_LOG="$TMP/reload.log"
+# Called from src/sub.sh, which shellcheck cannot follow through the sourced libs.
+# shellcheck disable=SC2329
+caddy_reload() { printf 'x\n' >>"$RELOAD_LOG"; return 0; }
+reload_count() { wc -l <"$RELOAD_LOG" | tr -d '[:space:]'; }
+: >"$RELOAD_LOG"
+touch "$SUB_STAMP"
+rm -f "$SUB_INFO_STAMP" "$SUB_RELOAD_PENDING"
+sub_regen >/dev/null 2>&1
+: >"$RELOAD_LOG"
+
+db_write '.users |= map(if .name == "alice" then .up = 4096 else . end)'
+sub_regen >/dev/null 2>&1
+assert_eq 1 "$(reload_count)" "the first userinfo change is published with one reload"
+assert_file_contains "$CADDY_USERS/alice.conf" "upload=4096" "the userinfo header reaches the route file"
+
+db_write '.users |= map(if .name == "alice" then .up = 8192 else . end)'
+sub_regen >/dev/null 2>&1
+db_write '.users |= map(if .name == "alice" then .up = 12288 else . end)'
+sub_regen >/dev/null 2>&1
+assert_eq 1 "$(reload_count)" "userinfo-only changes inside the window do not reload Caddy"
+assert_file_contains "$CADDY_USERS/alice.conf" "upload=12288" "a throttled change still reaches the route file"
+
+touch -d '7 hours ago' "$SUB_INFO_STAMP"
+db_write '.users |= map(if .name == "alice" then .up = 16384 else . end)'
+sub_regen >/dev/null 2>&1
+assert_eq 2 "$(reload_count)" "an aged userinfo stamp reloads Caddy once"
+
+# A throwaway user stands in for structural changes, so the real users keep their
+# tokens and the yaml paths asserted above stay valid.
+db_write --arg n zoe --arg u "$(gen_uuid)" --arg t "$(gen_hex 16)" \
+    '.users += [{name:$n,uuid:$u,token:$t,quota:0,up:0,down:0,enabled:true,disabled_reason:""}]'
+: >"$RELOAD_LOG"
+sub_regen >/dev/null 2>&1
+assert_eq 1 "$(reload_count)" "a new route reloads Caddy"
+[[ -f $CADDY_USERS/zoe.conf ]] && ok_test "the new route is published" || fail_test "the new route is published"
+
+db_write --arg t "$(gen_hex 16)" '.users |= map(if .name == "zoe" then .token = $t else . end)'
+: >"$RELOAD_LOG"
+sub_regen >/dev/null 2>&1
+assert_eq 1 "$(reload_count)" "rotating a subscription token reloads Caddy"
+leftover=$(cd "$CADDY_USERS" && printf '%s\n' .*.tmp)
+assert_eq ".*.tmp" "$leftover" "no temporary route file survives a regeneration"
+
+db_write '.users |= map(select(.name != "zoe"))'
+: >"$RELOAD_LOG"
+sub_regen >/dev/null 2>&1
+assert_eq 1 "$(reload_count)" "a removed route reloads Caddy"
+[[ ! -f $CADDY_USERS/zoe.conf ]] &&
+    ok_test "the removed route file is deleted" || fail_test "the removed route file is deleted"
+assert_eq 2 "$(db_get '.users | length')" "the user list is back to its original size"
+
+db_write '.users |= map(if .name == "alice" then .up = 0 else . end)'
+sub_regen >/dev/null 2>&1
+rm -f "$SUB_INFO_STAMP"
+unset -f caddy_reload reload_count
+# shellcheck disable=SC1090
+. "$PROJECT/src/caddy.sh"
 
 db_write '.users |= map(if .name == "alice" then .up = 2147483648 else . end)'
 traffic_evaluate
@@ -468,7 +529,7 @@ else
 fi
 assert_eq "$old_key" "$(db_get '.settings.private_key')" "failed key rotation keeps the previous key"
 
-for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
     # shellcheck disable=SC1090
     . "$PROJECT/src/$_lib.sh"
 done
@@ -482,8 +543,45 @@ assert_file_contains "$CADDYFILE" "try_files {path} /index.html" "Caddyfile has 
 fv_test_pass=$(fv_gen_password)
 [[ ${#fv_test_pass} -ge 16 && ${#fv_test_pass} -le 32 ]] &&
     ok_test "fv_gen_password produces valid high-strength password" || fail_test "fv_gen_password produces valid high-strength password"
+[[ $fv_test_pass =~ ^[A-Za-z0-9]+$ ]] &&
+    ok_test "fv_gen_password stays inside an unambiguous alphabet" ||
+    fail_test "fv_gen_password stays inside an unambiguous alphabet"
+[[ $fv_test_pass != Fv* ]] &&
+    ok_test "fv_gen_password has no enumerable timestamp fallback" ||
+    fail_test "fv_gen_password has no enumerable timestamp fallback"
+
+# The favicon is written only when absent, so a panel's own icon is never replaced
+rm -f "$WWW_DIR/favicon.ico"
+caddy_gen >/dev/null 2>&1
+[[ -s $WWW_DIR/favicon.ico ]] &&
+    ok_test "caddy_gen creates a favicon when the site has none" ||
+    fail_test "caddy_gen creates a favicon when the site has none"
+printf 'custom-icon' >"$WWW_DIR/favicon.ico"
+caddy_gen >/dev/null 2>&1
+assert_eq "custom-icon" "$(cat "$WWW_DIR/favicon.ico")" "an existing favicon is never overwritten"
+assert_success "the inlined favicon decodes to a well-formed 16x16 ICO" \
+    python3 -c 'import base64,struct,sys; d=base64.b64decode(sys.argv[1]); assert struct.unpack_from("<HHH", d, 0) == (0, 1, 1), "bad ICONDIR"; assert d[6] == 16 and d[7] == 16, "not 16x16"; size, off = struct.unpack_from("<II", d, 14); assert len(d) == off + size, "truncated payload"; assert d[off:off + 8] == b"\x89PNG\r\n\x1a\n", "no PNG payload"' \
+    "$CADDY_FAVICON_B64"
+
+# A fallback that silently degraded to the generated placeholder is a strong tell
+printf '<!doctype html><html><body><div id="root"></div></body></html>\n' >"$TMP/real-index.html"
+assert_failure "a real single-page app is not mistaken for a placeholder" \
+    caddy_index_is_placeholder "$TMP/real-index.html"
+caddy_gen_index >"$TMP/gen-index.html"
+assert_success "a generated fallback page is recognised as a placeholder" \
+    caddy_index_is_placeholder "$TMP/gen-index.html"
+printf '%s\n' "$CADDY_OLD_INDEX" >"$TMP/old-index.html"
+assert_success "the legacy under-construction page is recognised as a placeholder" \
+    caddy_index_is_placeholder "$TMP/old-index.html"
+assert_failure "an absent index.html is not reported as a placeholder" \
+    caddy_index_is_placeholder "$TMP/absent-index.html"
 
 db_write '.settings.futures_view.enabled = true'
+printf '%s\n' "$CADDY_OLD_INDEX" >"$WWW_DIR/index.html"
+stale_warn=$(caddy_gen 2>&1 >/dev/null)
+[[ $stale_warn == *"placeholder"* ]] &&
+    ok_test "an enabled panel behind a placeholder fallback warns at deploy time" ||
+    fail_test "an enabled panel behind a placeholder fallback warns at deploy time"
 caddy_gen
 assert_file_contains "$CADDYFILE" "handle /api/*" "Caddyfile includes /api/* handle when FuturesView enabled"
 assert_file_contains "$CADDYFILE" "reverse_proxy 127.0.0.1:8888" "Caddyfile proxies /api/* to FV_PORT"
@@ -492,9 +590,57 @@ fv_status_out=$(fv_status)
 [[ $fv_status_out == *"FuturesView Panel Status"* && $fv_status_out == *"127.0.0.1:8888"* ]] &&
     ok_test "fv_status displays status and port" || fail_test "fv_status displays status and port"
 
+assert_eq 60 "$(fv_cpu_limit)" "FuturesView CPU limit defaults to 60%"
+fv_rendered=$(fv_render_unit)
+[[ $fv_rendered == *"CPUQuota=60%"* ]] &&
+    ok_test "FuturesView unit includes default 60% CPUQuota" || fail_test "FuturesView unit includes default 60% CPUQuota"
+[[ $fv_rendered == *"Nice=15"* ]] &&
+    ok_test "FuturesView unit includes low Nice priority" || fail_test "FuturesView unit includes low Nice priority"
+
+fv_set_cpu_limit_cmd 75 >/dev/null 2>&1
+assert_eq 75 "$(fv_cpu_limit)" "fv_set_cpu_limit_cmd updates CPU limit to 75%"
+fv_rendered=$(fv_render_unit)
+[[ $fv_rendered == *"CPUQuota=75%"* ]] &&
+    ok_test "FuturesView unit renders updated 75% CPUQuota" || fail_test "FuturesView unit renders updated 75% CPUQuota"
+
+fv_set_cpu_limit_cmd off >/dev/null 2>&1
+assert_eq 0 "$(fv_cpu_limit)" "fv_set_cpu_limit_cmd off disables CPU limit"
+fv_rendered=$(fv_render_unit)
+[[ $fv_rendered != *"CPUQuota="* ]] &&
+    ok_test "disabled CPU limit removes CPUQuota from unit" || fail_test "disabled CPU limit removes CPUQuota from unit"
+[[ $fv_rendered != *"@FV_CPU_OPTS@"* ]] &&
+    ok_test "rendered unit leaves no leftover template placeholders" || fail_test "rendered unit leaves no leftover template placeholders"
+
+fv_status_off=$(fv_status)
+[[ $fv_status_off == *"CPU limit:     Disabled (unlimited)"* ]] &&
+    ok_test "fv_status displays disabled CPU limit" || fail_test "fv_status displays disabled CPU limit"
+
+fv_set_cpu_limit_cmd 60 >/dev/null 2>&1
+fv_status_on=$(fv_status)
+[[ $fv_status_on == *"CPU limit:     60% (Nice=15, low priority)"* ]] &&
+    ok_test "fv_status displays active CPU limit" || fail_test "fv_status displays active CPU limit"
+
 db_write '.settings.futures_view.enabled = false'
 caddy_gen
 assert_file_not_contains "$CADDYFILE" "handle /api/*" "disabling FuturesView removes API proxy from Caddyfile"
+
+# Disguise health check: read-only, and it must never abort its caller
+if cert_out=$(cert_summary); then
+    ok_test "cert_summary never fails, whatever the probe finds"
+else
+    fail_test "cert_summary never fails, whatever the probe finds"
+fi
+[[ $cert_out == *"unavailable"* ]] &&
+    ok_test "cert_summary reports an unreachable fallback site as unavailable" ||
+    fail_test "cert_summary reports an unreachable fallback site as unavailable (got '$cert_out')"
+if node_check >"$TMP/check.out" 2>&1; then
+    fail_test "node_check fails while the node services are down"
+else
+    ok_test "node_check fails while the node services are down"
+fi
+assert_file_contains "$TMP/check.out" "failed" "node_check prints a pass/warn/fail tally"
+assert_file_contains "$TMP/check.out" "Reality dest" "node_check verifies the Reality dest"
+assert_file_contains "$TMP/check.out" "placeholder" "node_check reports the degraded fallback page"
 
 if grep -R -E -n 'cluster_cmd|cluster_is|menu_cluster|cluster_(init|join|report|fetch)' \
     "$PROJECT/src" "$PROJECT/systemd" "$PROJECT/vpsm.sh" "$PROJECT/install.sh" >/dev/null; then
@@ -505,7 +651,8 @@ fi
 help_output=$(bash "$PROJECT/vpsm.sh" help)
 [[ $help_output == *"single-node multi-user"* ]] && ok_test "English CLI help is available" || fail_test "English CLI help is available"
 menu_output=$(printf '0\n' | bash "$PROJECT/vpsm.sh" 2>/dev/null)
-if [[ $menu_output == *"1) Change SSH port"* && $menu_output == *"16) Manage FuturesView panel"* && $menu_output == *"17) Uninstall vpsm"* ]]; then
+if [[ $menu_output == *"1) Change SSH port"* && $menu_output == *"11) Check disguise health"* &&
+    $menu_output == *"17) Manage FuturesView panel"* && $menu_output == *"18) Uninstall vpsm"* ]]; then
     ok_test "interactive CLI renders the complete numeric panel"
 else
     fail_test "interactive CLI renders the complete numeric panel"

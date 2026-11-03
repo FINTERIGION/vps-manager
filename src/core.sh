@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.3.3"
+VPSM_VERSION="1.4.0"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -25,7 +25,14 @@ CUSTOM_RULES="$ROOT/clash-custom-rules.yaml"
 LOCK_FILE="$ROOT/.lock"
 SUB_STAMP="$ROOT/.sub_stamp"
 SUB_RELOAD_PENDING="$ROOT/.sub_reload_pending"
+SUB_INFO_STAMP="$ROOT/.sub_info_stamp"
 SUB_REFRESH=1800
+# Clients re-read subscription-userinfo only every 12h (profile-update-interval),
+# so a userinfo-only change must not reload Caddy on every sync tick.
+SUB_INFO_REFRESH=21600
+CERT_STAMP="$ROOT/.cert_stamp"
+CERT_CHECK_INTERVAL=21600
+CERT_WARN_DAYS=15
 EXTRA_REFRESH=43200
 EXTRA_UA=${VPSM_EXTRA_UA:-clash-verge/v2.0.0 mihomo/1.18.0}
 
@@ -159,7 +166,7 @@ db_migrate() {
     fi
     db_write 'if (.settings.expire // null) == null then .settings.expire = (.users[0].expire // "") else . end
         | .settings.extra_subs = (.settings.extra_subs // [])
-        | .settings.futures_view = ({enabled: false, port: 8888, repo: "https://github.com/FINTERIGION/futures-view.git", password: ""} + (.settings.futures_view // {}))
+        | .settings.futures_view = ({enabled: false, port: 8888, repo: "https://github.com/FINTERIGION/futures-view.git", password: "", cpu_limit: 60} + (.settings.futures_view // {}))
         | del(.settings.ssh_port, .settings.cdn)
         | .users |= map(del(.expire, .sources, .extra_subs))'
 }
