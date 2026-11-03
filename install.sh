@@ -185,7 +185,7 @@ if [[ -z $RESUME ]]; then
     valid_domain "$DOMAIN" || die "Invalid domain: $DOMAIN"
     ask PORT "Xray listen port" 443
     valid_port "$PORT" || die "Invalid port: $PORT"
-    valid_xray_port "$PORT" || die "Port $PORT is reserved internally (80 / $CADDY_PORT / $API_PORT)"
+    valid_xray_port "$PORT" || die "Port $PORT is reserved internally (80 / $CADDY_PORT / $API_PORT / $FV_PORT)"
     ask NODE_NAME "Node name shown in clients" "$DOMAIN"
     if [[ $NODE_NAME != "$DOMAIN" ]]; then
         valid_node_name "$NODE_NAME" || die "Invalid node name"

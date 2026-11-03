@@ -230,14 +230,13 @@ def load_names(path):
     return names
 
 
-def check_names(path, *local_names):
+def check_names(path, local_name):
     names = load_names(path)
     duplicates = [name for name, count in Counter(names).items() if count > 1]
     if duplicates:
         fail(f"duplicate proxy names across subscriptions: {duplicates[0]!r}")
-    for local_name in local_names:
-        if local_name and local_name in names:
-            fail(f"the local node name conflicts with an external proxy: {local_name}")
+    if local_name in names:
+        fail(f"the local node name conflicts with an external proxy: {local_name}")
     if any(name in RESERVED_NAMES for name in names):
         fail("external subscriptions contain a reserved proxy name")
 
@@ -246,8 +245,8 @@ def main():
     try:
         if len(sys.argv) == 6 and sys.argv[1] == "normalize":
             write_normalized(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
-        elif len(sys.argv) >= 4 and sys.argv[1] == "check-names":
-            check_names(sys.argv[2], *sys.argv[3:])
+        elif len(sys.argv) == 4 and sys.argv[1] == "check-names":
+            check_names(sys.argv[2], sys.argv[3])
         elif len(sys.argv) == 3 and sys.argv[1] == "check-filter":
             compile_filter(sys.argv[2])
         elif len(sys.argv) == 3 and sys.argv[1] == "check-url":

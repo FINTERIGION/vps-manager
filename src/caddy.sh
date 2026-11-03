@@ -46,7 +46,7 @@ fv_port() {
 }
 
 caddy_stale() {
-    local domain port want cdn_d
+    local domain port want
     [[ -f $CADDYFILE ]] || return 0
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
@@ -57,16 +57,6 @@ caddy_stale() {
     fi
     grep -qF "$want" "$CADDYFILE" || return 0
     grep -qF "$domain:$CADDY_PORT" "$CADDYFILE" || return 0
-    if cdn_enabled; then
-        cdn_d=$(cdn_domain)
-        grep -qF "127.0.0.1:$WS_PORT" "$CADDYFILE" || return 0
-        grep -qF "$(cdn_path)" "$CADDYFILE" || return 0
-        if [[ $cdn_d != "$domain" ]]; then
-            grep -qF "$cdn_d:$CADDY_PORT" "$CADDYFILE" || return 0
-        fi
-    else
-        grep -qF "127.0.0.1:$WS_PORT" "$CADDYFILE" && return 0
-    fi
     if fv_enabled; then
         grep -qF "127.0.0.1:$(fv_port)" "$CADDYFILE" || return 0
     else
@@ -77,7 +67,7 @@ caddy_stale() {
 }
 
 caddy_gen() {
-    local domain port tmp cdn_d cdn_p https_hosts http_hosts cdn_handle="" fv_handle=""
+    local domain port tmp fv_handle=""
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
     [[ $port == 443 ]] && port="" || port=":$port"
@@ -89,21 +79,6 @@ caddy_gen() {
     if [[ ! -f $WWW_DIR/index.html ]] || grep -qF "$CADDY_OLD_INDEX" "$WWW_DIR/index.html"; then
         caddy_gen_index >"$WWW_DIR/index.html"
         chmod 644 "$WWW_DIR/index.html"
-    fi
-
-    https_hosts="$domain:$CADDY_PORT"
-    http_hosts="http://$domain"
-    if cdn_enabled; then
-        cdn_d=$(cdn_domain)
-        cdn_p=$(cdn_path)
-        if [[ $cdn_d != "$domain" ]]; then
-            https_hosts="$domain:$CADDY_PORT, $cdn_d:$CADDY_PORT"
-            http_hosts="http://$domain, http://$cdn_d"
-        fi
-        cdn_handle="	handle $cdn_p {
-		reverse_proxy 127.0.0.1:$WS_PORT
-	}
-"
     fi
 
     if fv_enabled; then
@@ -136,7 +111,7 @@ caddy_gen() {
 	}
 }
 
-$https_hosts {
+$domain:$CADDY_PORT {
 	bind 127.0.0.1
 	tls {
 		issuer acme {
@@ -145,15 +120,15 @@ $https_hosts {
 	}
 	import site
 	import $CADDY_USERS/*.conf
-${cdn_handle}${fv_handle}	handle {
+${fv_handle}	handle {
 		try_files {path} /index.html
 		file_server
 	}
 }
 
-$http_hosts {
+http://$domain {
 	import site
-${cdn_handle}	# vpsm-http-redirect-only: ACME HTTP-01 and HTTPS redirect
+	# vpsm-http-redirect-only: ACME HTTP-01 and HTTPS redirect
 	handle {
 		redir https://$domain$port{uri} permanent
 	}

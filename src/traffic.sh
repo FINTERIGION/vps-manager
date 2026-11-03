@@ -69,17 +69,16 @@ state_diff() {
 
 traffic_evaluate() {
     RESET_DONE=""
-    local month day rd last expire
-    month=$(date +%Y-%m)
-    day=$((10#$(date +%d)))
+    local rd last expire expected_lr
     rd=$(db_get '.settings.reset_day')
     last=$(db_get '.settings.last_reset')
     expire=$(db_get '.settings.expire // ""')
-    if ((day >= rd)) && [[ $last != "$month" ]]; then
-        db_write --arg m "$month" \
+    expected_lr=$(calc_last_reset "$rd")
+    if [[ $last != "$expected_lr" ]]; then
+        db_write --arg m "$expected_lr" \
             '.settings.last_reset = $m | .users |= map(.up = 0 | .down = 0)'
         RESET_DONE=1
-        msg "Monthly traffic reset done ($month)"
+        msg "Monthly traffic reset done ($expected_lr)"
     fi
     db_write --arg today "$(today)" --arg expire "$expire" '
         .users |= map(

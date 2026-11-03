@@ -244,7 +244,14 @@ fv_set_password_cmd() {
         choice=$(ask "Choose: ")
         case $choice in
             1) new_p=$(fv_gen_password) ;;
-            2) new_p=$(ask "New password (8-256 characters): ") ;;
+            2)
+                if [[ -t 0 ]]; then
+                    read -r -s -p "New password (8-256 characters): " new_p
+                    echo
+                else
+                    new_p=$(ask "New password (8-256 characters): ")
+                fi
+                ;;
             *) return 0 ;;
         esac
     fi

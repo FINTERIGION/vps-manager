@@ -76,9 +76,7 @@ extra_sub_fetch() {
         return 1
     fi
     # Refuse a provider update that renames a node onto the local node, keeping the last good cache
-    local_names=("$(local_proxy_name)")
-    cdn_enabled && local_names+=("$(cdn_node_name)")
-    if ! python3 "$SH_DIR/src/extra_sub.py" check-names "$tmp/names.yaml" "${local_names[@]}"; then
+    if ! python3 "$SH_DIR/src/extra_sub.py" check-names "$tmp/names.yaml" "$(local_proxy_name)"; then
         rm -rf "$tmp"
         warn "External subscription $alias conflicts with the local node name"
         return 1
@@ -198,16 +196,15 @@ extra_sub_refresh() {
 }
 
 extra_sub_assert_local_name() {
-    local candidate=$1 file local_names=("$1")
-    local_names+=("$candidate [CDN]")
+    local candidate=$1 file
     for file in "$SUB_EXTRA"/*.names.yaml; do
         [[ -e $file ]] || continue
-        python3 "$SH_DIR/src/extra_sub.py" check-names "$file" "${local_names[@]}" || return 1
+        python3 "$SH_DIR/src/extra_sub.py" check-names "$file" "$candidate" || return 1
     done
 }
 
 extra_sub_stage() {
-    local out=$1 alias local_names
+    local out=$1 alias
     : >"$out/proxies"
     : >"$out/names"
     while read -r alias; do
@@ -219,9 +216,7 @@ extra_sub_stage() {
         cat "$SUB_EXTRA/$alias.proxies.yaml" >>"$out/proxies"
         cat "$SUB_EXTRA/$alias.names.yaml" >>"$out/names"
     done < <(db_get '.settings.extra_subs[]?.alias')
-    local_names=("$(local_proxy_name)")
-    cdn_enabled && local_names+=("$(cdn_node_name)")
-    python3 "$SH_DIR/src/extra_sub.py" check-names "$out/names" "${local_names[@]}"
+    python3 "$SH_DIR/src/extra_sub.py" check-names "$out/names" "$(local_proxy_name)"
 }
 
 # Move caches from the retired per-user layout ($SUB_EXTRA/<user>/<alias>.*) to the shared layout

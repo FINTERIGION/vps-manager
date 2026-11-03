@@ -474,67 +474,6 @@ for _lib in xray traffic extra_sub sub caddy user firewall security manage futur
 done
 unset _lib
 
-# CDN functionality tests
-assert_eq "false" "$(cdn_enabled && echo true || echo false)" "CDN node is disabled by default"
-assert_file_not_contains "$XRAY_CONF" "vless-ws" "Xray config has no vless-ws inbound by default"
-assert_file_not_contains "$CADDYFILE" "127.0.0.1:$WS_PORT" "Caddyfile has no WS reverse proxy by default"
-assert_file_not_contains "$alice_yaml" "[CDN]" "Clash YAML has no CDN node by default"
-
-set_cdn_status true
-assert_eq "true" "$(cdn_enabled && echo true || echo false)" "set_cdn_status true enables CDN"
-assert_file_contains "$XRAY_CONF" "vless-ws" "Xray config includes vless-ws inbound"
-assert_file_contains "$XRAY_CONF" '"port": 10086' "Xray vless-ws listens on WS_PORT"
-assert_file_contains "$XRAY_CONF" '"network": "ws"' "Xray vless-ws uses ws network"
-assert_file_contains "$XRAY_CONF" '"path": "/vless-ws"' "Xray vless-ws uses default path"
-assert_file_contains "$CADDYFILE" "handle /vless-ws" "Caddyfile contains handle for WS path"
-assert_file_contains "$CADDYFILE" "reverse_proxy 127.0.0.1:10086" "Caddyfile reverse-proxies to WS_PORT"
-
-alice_yaml="$SUB_DIR/$(user_get alice '.token').yaml"
-assert_file_contains "$alice_yaml" 'name: "node.example.com [CDN]"' "Clash YAML renders CDN node with [CDN] suffix"
-assert_file_contains "$alice_yaml" 'network: ws' "Clash CDN node uses ws network"
-assert_file_contains "$alice_yaml" 'path: /vless-ws' "Clash CDN node uses default path"
-assert_file_contains "$alice_yaml" '- "node.example.com [CDN]"' "Proxy groups include the [CDN] node"
-assert_success "generated Clash YAML with CDN node is valid" python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1], encoding="utf-8")); p_names=[p["name"] for p in d["proxies"]]; assert "node.example.com [CDN]" in p_names; assert "node.example.com" in p_names; assert "node.example.com [CDN]" in d["proxy-groups"][0]["proxies"]' "$alice_yaml"
-
-cdn_link=$(vless_cdn_share_url alice)
-[[ $cdn_link == vless://*@node.example.com:443* && $cdn_link == *type=ws* && $cdn_link == *path=%2Fvless-ws* && $cdn_link == *%5BCDN%5D* ]] &&
-    ok_test "vless_cdn_share_url produces valid VLESS WebSocket link" || fail_test "vless_cdn_share_url produces valid VLESS WebSocket link"
-
-set_cdn_domain cdn.example.com
-assert_eq "cdn.example.com" "$(cdn_domain)" "custom CDN domain is stored"
-assert_file_contains "$CADDYFILE" "cdn.example.com:8443" "Caddyfile includes custom CDN domain"
-
-set_cdn_server 104.16.88.99
-assert_eq "104.16.88.99" "$(cdn_server)" "custom CDN preferred IP is stored"
-
-set_cdn_port 8443
-assert_eq "8443" "$(cdn_port)" "custom CDN port is stored"
-
-set_cdn_path /custom-path
-assert_eq "/custom-path" "$(cdn_path)" "custom CDN path is stored"
-assert_file_contains "$XRAY_CONF" '"path": "/custom-path"' "Xray config updates WS path"
-assert_file_contains "$CADDYFILE" "handle /custom-path" "Caddyfile updates handle path"
-
-alice_yaml="$SUB_DIR/$(user_get alice '.token').yaml"
-assert_file_contains "$alice_yaml" "server: 104.16.88.99" "Clash YAML uses preferred server IP"
-assert_file_contains "$alice_yaml" "port: 8443" "Clash YAML uses custom CDN port"
-assert_file_contains "$alice_yaml" "servername: cdn.example.com" "Clash YAML uses custom CDN SNI"
-assert_file_contains "$alice_yaml" "Host: cdn.example.com" "Clash YAML uses custom CDN Host header"
-assert_file_contains "$alice_yaml" "path: /custom-path" "Clash YAML uses custom WS path"
-assert_success "generated Clash YAML with custom CDN parameters is valid" python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))' "$alice_yaml"
-
-set_cdn_status false
-assert_eq "false" "$(cdn_enabled && echo true || echo false)" "set_cdn_status false disables CDN"
-assert_file_not_contains "$XRAY_CONF" "vless-ws" "disabling CDN removes vless-ws from Xray"
-assert_file_not_contains "$CADDYFILE" "127.0.0.1:10086" "disabling CDN removes WS reverse proxy from Caddyfile"
-alice_yaml="$SUB_DIR/$(user_get alice '.token').yaml"
-assert_file_not_contains "$alice_yaml" "[CDN]" "disabling CDN removes CDN node from Clash YAML"
-assert_success "Clash YAML remains valid after disabling CDN" python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))' "$alice_yaml"
-
-cdn_status_output=$(bash "$PROJECT/vpsm.sh" cdn status)
-[[ $cdn_status_output == *"Status:          Disabled"* ]] &&
-    ok_test "CLI cdn status reports disabled" || fail_test "CLI cdn status reports disabled"
-
 # FuturesView functionality tests
 assert_eq "false" "$(fv_enabled && echo true || echo false)" "FuturesView is disabled by default"
 assert_file_not_contains "$CADDYFILE" "handle /api/*" "Caddyfile has no FuturesView API proxy by default"

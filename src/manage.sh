@@ -59,25 +59,32 @@ svc_start() {
 svc_stop() {
     local s list
     list=$(svc_targets "${1:-}") || return 1
-    if [[ ${1:-all} != caddy ]] && xray_active; then
+    if [[ ${1:-all} == xray || ${1:-all} == all ]] && xray_active; then
         traffic_pull || traffic_pull || err "Failed to persist Xray traffic, not stopping"
     fi
     for s in $list; do svc stop "$s" && ok "Stopped $s"; done
 }
 svc_restart() {
     local t=${1:-all}
-    svc_targets "$t" >/dev/null
-    if [[ $t != caddy ]]; then
+    svc_targets "$t" >/dev/null || return 1
+    if [[ $t == xray || $t == all || $t == "" ]]; then
         xray_gen_config
         xray_restart force || err "Failed to restart Xray, check: journalctl -u $XRAY_SVC -n 50"
         svc_settled "$XRAY_SVC" || err "Xray failed to stay up after restart, check: journalctl -u $XRAY_SVC -n 50"
         ok "Restarted $XRAY_SVC"
     fi
-    if [[ $t != xray ]]; then
+    if [[ $t == caddy || $t == all || $t == "" ]]; then
         caddy_gen
         svc restart "$CADDY_SVC"
         svc_settled "$CADDY_SVC" || err "Caddy failed to stay up after restart, check: journalctl -u $CADDY_SVC -n 50"
         ok "Restarted $CADDY_SVC"
+    fi
+    if [[ $t == fv || $t == futures-view || ($t == all && $(fv_enabled && echo 1 || echo 0) == 1) ]]; then
+        if svc_active "$FV_SVC" || fv_enabled; then
+            svc restart "$FV_SVC"
+            svc_settled "$FV_SVC" || err "FuturesView failed to stay up after restart, check: journalctl -u $FV_SVC -n 50"
+            ok "Restarted $FV_SVC"
+        fi
     fi
 }
 
@@ -88,17 +95,6 @@ show_node_info() {
     echo "Profile name:    $(sub_name)"
     echo "Domain/port:     $(db_get '.settings.domain'):$(db_get '.settings.port')"
     echo "Reality:         configured (public key and shortId are available in client links)"
-    if cdn_enabled; then
-        echo "CDN node:        Enabled ($(cdn_node_name), port: $(cdn_port), path: $(cdn_path))"
-        if [[ $(cdn_domain) != "$(db_get '.settings.domain')" ]]; then
-            echo "CDN domain:      $(cdn_domain)"
-        fi
-        if [[ $(cdn_server) != "$(cdn_domain)" ]]; then
-            echo "CDN server:      $(cdn_server)"
-        fi
-    else
-        echo "CDN node:        Disabled"
-    fi
     echo "UDP forwarding:  $(udp_enabled && echo Enabled || echo 'Disabled (pure TCP)')"
     echo "Users:           $(db_get '.users | length') ($(db_get '[.users[] | select(.enabled)] | length') enabled)"
     echo "Global expiry:   ${expire:-never}"
@@ -130,7 +126,6 @@ show_status() {
     echo "FuturesView:   $([[ -d $FV_DIR/.git ]] && echo "installed ($(fv_enabled && echo "enabled" || echo "disabled"))" || echo "not installed")"
     echo "Domain/port:   $(db_get '.settings.domain'):$(db_get '.settings.port')"
     echo "Node name:     $(node_name)"
-    echo "CDN node:      $(if cdn_enabled; then echo "enabled ($(cdn_node_name))"; else echo "disabled"; fi)"
     echo "Users:         $(db_get '.users | length') ($(db_get '[.users[] | select(.enabled)] | length') enabled)"
     echo "Global expiry: ${expire:-never}"
     echo "Reset day:     day $(db_get '.settings.reset_day') of each month (next: $(next_reset_date))"
@@ -352,6 +347,7 @@ do_uninstall() {
     svc disable --now vpsm-traffic.timer 2>/dev/null
     svc disable --now "$XRAY_SVC" 2>/dev/null
     svc disable --now "$CADDY_SVC" 2>/dev/null
+    svc disable --now "$FV_SVC" 2>/dev/null
     svc disable --now "$FW_SVC" 2>/dev/null
     fw_flush_all
     if swap_is_managed; then
@@ -364,7 +360,7 @@ do_uninstall() {
         ok "Uninstalled (dry run)"
         return 0
     fi
-    rm -f /etc/systemd/system/vpsm-{xray,caddy,traffic,firewall}.service /etc/systemd/system/vpsm-traffic.timer
+    rm -f /etc/systemd/system/vpsm-{xray,caddy,traffic,firewall,futures-view}.service /etc/systemd/system/vpsm-traffic.timer
     rm -f /usr/local/bin/vpsm /etc/sysctl.d/99-vpsm-bbr.conf
     systemctl daemon-reload
     userdel "$SVC_USER" 2>/dev/null
@@ -401,7 +397,6 @@ Subscriptions:
 Node:
   node [name|0]                     Show or set the local proxy name
   node port|domain|key|shortid      Configure the listener and Reality parameters
-  cdn [on|off|domain|server|port|path] Configure optional Cloudflare CDN node
   rules                             Edit custom Clash rules
   regen                             Regenerate all configs and subscriptions
 
