@@ -417,7 +417,7 @@ System:
   check                             Probe the fallback site the way a censor does
   start|stop|restart [xray|caddy|fv|all]
   log [xray|caddy|fv|sync]
-  fv [deploy|update|status|password|cpu|restart|log|remove] Manage FuturesView web panel
+  fv [deploy|update|status|password|apikey|cpu|restart|log|remove] Manage FuturesView web panel
   update [core|caddy|sh|all]        Update components and scripts, not the kernel
   kernel [-y]                       Update system packages and kernel safely
   bbr                               Enable BBR

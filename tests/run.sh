@@ -608,7 +608,7 @@ assert_eq 0 "$(fv_cpu_limit)" "fv_set_cpu_limit_cmd off disables CPU limit"
 fv_rendered=$(fv_render_unit)
 [[ $fv_rendered != *"CPUQuota="* ]] &&
     ok_test "disabled CPU limit removes CPUQuota from unit" || fail_test "disabled CPU limit removes CPUQuota from unit"
-[[ $fv_rendered != *"@FV_CPU_OPTS@"* ]] &&
+[[ $fv_rendered != *"@FV_CPU_OPTS@"* && $fv_rendered != *"@FV_ENV_OPTS@"* ]] &&
     ok_test "rendered unit leaves no leftover template placeholders" || fail_test "rendered unit leaves no leftover template placeholders"
 
 fv_status_off=$(fv_status)
@@ -619,6 +619,28 @@ fv_set_cpu_limit_cmd 60 >/dev/null 2>&1
 fv_status_on=$(fv_status)
 [[ $fv_status_on == *"CPU limit:     60% (Nice=15, low priority)"* ]] &&
     ok_test "fv_status displays active CPU limit" || fail_test "fv_status displays active CPU limit"
+
+assert_eq "" "$(fv_get_dce_api_key)" "FuturesView DCE API key is empty by default"
+fv_status_dce_none=$(fv_status)
+[[ $fv_status_dce_none == *"DCE API Key:   Not set"* ]] &&
+    ok_test "fv_status displays DCE API key not set" || fail_test "fv_status displays DCE API key not set"
+
+fv_set_dce_api_key_cmd "test-dce-key-abc12345" >/dev/null 2>&1
+assert_eq "test-dce-key-abc12345" "$(fv_get_dce_api_key)" "fv_set_dce_api_key_cmd updates DCE API key"
+fv_rendered=$(fv_render_unit)
+[[ $fv_rendered == *'Environment="DCE_API_KEY=test-dce-key-abc12345"'* && $fv_rendered == *'Environment="FT_DCE_API_KEY=test-dce-key-abc12345"'* ]] &&
+    ok_test "FuturesView unit renders configured DCE API key" || fail_test "FuturesView unit renders configured DCE API key"
+
+fv_status_dce_set=$(fv_status)
+[[ $fv_status_dce_set == *"DCE API Key:   Configured (test****2345)"* ]] &&
+    ok_test "fv_status displays masked DCE API key" || fail_test "fv_status displays masked DCE API key"
+
+fv_set_dce_api_key_cmd clear >/dev/null 2>&1
+assert_eq "" "$(fv_get_dce_api_key)" "fv_set_dce_api_key_cmd clear resets DCE API key"
+fv_rendered=$(fv_render_unit)
+[[ $fv_rendered != *"DCE_API_KEY"* && $fv_rendered != *"@FV_ENV_OPTS@"* ]] &&
+    ok_test "cleared DCE API key removes environment option and leaves no placeholder" ||
+    fail_test "cleared DCE API key removes environment option and leaves no placeholder"
 
 db_write '.settings.futures_view.enabled = false'
 caddy_gen

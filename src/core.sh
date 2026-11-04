@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.4.0"
+VPSM_VERSION="1.4.1"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -166,7 +166,7 @@ db_migrate() {
     fi
     db_write 'if (.settings.expire // null) == null then .settings.expire = (.users[0].expire // "") else . end
         | .settings.extra_subs = (.settings.extra_subs // [])
-        | .settings.futures_view = ({enabled: false, port: 8888, repo: "https://github.com/FINTERIGION/futures-view.git", password: "", cpu_limit: 60} + (.settings.futures_view // {}))
+        | .settings.futures_view = ({enabled: false, port: 8888, repo: "https://github.com/FINTERIGION/futures-view.git", password: "", cpu_limit: 60, dce_api_key: ""} + (.settings.futures_view // {}))
         | del(.settings.ssh_port, .settings.cdn)
         | .users |= map(del(.expire, .sources, .extra_subs))'
 }

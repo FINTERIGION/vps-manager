@@ -43,13 +43,47 @@ fv_cpu_limit() {
     db_get 'if (.settings.futures_view.cpu_limit // null) != null and .settings.futures_view.cpu_limit != "" then .settings.futures_view.cpu_limit else 60 end'
 }
 
+fv_get_dce_api_key() {
+    db_get '.settings.futures_view.dce_api_key // ""'
+}
+
+fv_sync_env_file() {
+    [[ -d $FV_DIR ]] || return 0
+    local key env_file="$FV_DIR/.env" tmp=""
+    key=$(fv_get_dce_api_key)
+    if [[ -f $env_file ]]; then
+        tmp=$(grep -v -E '^(DCE_API_KEY|FT_DCE_API_KEY)=' "$env_file" 2>/dev/null || true)
+    fi
+    if [[ -n $key ]]; then
+        {
+            [[ -n $tmp ]] && printf '%s\n' "$tmp"
+            printf 'DCE_API_KEY="%s"\n' "$key"
+            printf 'FT_DCE_API_KEY="%s"\n' "$key"
+        } > "$env_file"
+        chmod 600 "$env_file" 2>/dev/null || true
+    else
+        if [[ -n $tmp ]]; then
+            printf '%s\n' "$tmp" > "$env_file"
+            chmod 600 "$env_file" 2>/dev/null || true
+        else
+            rm -f "$env_file"
+        fi
+    fi
+}
+
 fv_render_unit() {
-    local domain port cpu_limit cpu_opts="" content
+    local domain port cpu_limit cpu_opts="" content dce_key env_opts=""
     domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
     port=$(fv_port 2>/dev/null || echo "8888")
     cpu_limit=$(fv_cpu_limit 2>/dev/null || echo "60")
     if [[ $cpu_limit =~ ^[1-9][0-9]*$ && $cpu_limit -gt 0 ]]; then
         cpu_opts=$(printf 'CPUQuota=%s%%\nNice=15' "$cpu_limit")
+    fi
+    dce_key=$(fv_get_dce_api_key 2>/dev/null || echo "")
+    if [[ -n $dce_key ]]; then
+        local escaped_k="${dce_key//\\/\\\\}"
+        escaped_k="${escaped_k//\"/\\\"}"
+        env_opts=$(printf 'Environment="DCE_API_KEY=%s"\nEnvironment="FT_DCE_API_KEY=%s"' "$escaped_k" "$escaped_k")
     fi
     content=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/vpsm-futures-view.service")
     if [[ -n $cpu_opts ]]; then
@@ -57,15 +91,21 @@ fv_render_unit() {
     else
         content=$(printf '%s\n' "$content" | grep -v '@FV_CPU_OPTS@')
     fi
+    if [[ -n $env_opts ]]; then
+        content="${content//@FV_ENV_OPTS@/$env_opts}"
+    else
+        content=$(printf '%s\n' "$content" | grep -v '@FV_ENV_OPTS@')
+    fi
     printf '%s\n' "$content"
 }
 
 fv_status() {
-    local state pid rss="-" domain port pwd cpu_lim
+    local state pid rss="-" domain port pwd cpu_lim dce_k
     domain=$(db_get '.settings.domain')
     port=$(fv_port)
     pwd=$(fv_get_password)
     cpu_lim=$(fv_cpu_limit)
+    dce_k=$(fv_get_dce_api_key)
     echo "=== FuturesView Panel Status ==="
     echo "Enabled:       $(fv_enabled && echo "yes" || echo "no")"
     echo "Repository:    $FV_DIR $([[ -d $FV_DIR/.git ]] && echo "(git $(git -C "$FV_DIR" rev-parse --short HEAD 2>/dev/null || echo "cloned"))" || echo "(not cloned)")"
@@ -83,6 +123,13 @@ fv_status() {
         echo "CPU limit:     ${cpu_lim}% (Nice=15, low priority)"
     else
         echo "CPU limit:     Disabled (unlimited)"
+    fi
+    if [[ -n $dce_k ]]; then
+        local masked_k="${dce_k:0:4}****${dce_k: -4}"
+        (( ${#dce_k} <= 8 )) && masked_k="****"
+        echo "DCE API Key:   Configured ($masked_k)"
+    else
+        echo "DCE API Key:   Not set"
     fi
     echo "Listen addr:   127.0.0.1:$port"
     echo "WebUI URL:     https://$domain"
@@ -190,6 +237,7 @@ fv_deploy() {
 
     db_write '.settings.futures_view.enabled = true | if (.settings.futures_view.cpu_limit // null) == null then .settings.futures_view.cpu_limit = 60 else . end'
 
+    fv_sync_env_file
     install_units
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         systemctl daemon-reload
@@ -258,6 +306,8 @@ fv_update() {
         cp -r "$FV_DIR/web/static/"* "$WWW_DIR/"
         chmod -R 755 "$WWW_DIR"
     fi
+
+    fv_sync_env_file
 
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         msg "Restarting $FV_SVC service ..."
@@ -378,6 +428,76 @@ fv_set_cpu_limit_cmd() {
     fi
 }
 
+fv_set_dce_api_key_cmd() {
+    need_root
+    need_installed
+    local key=${1:-}
+    if [[ -z $key ]]; then
+        local curr choice
+        curr=$(fv_get_dce_api_key)
+        if [[ -n $curr ]]; then
+            local masked="${curr:0:4}****${curr: -4}"
+            (( ${#curr} <= 8 )) && masked="****"
+            echo "Current DCE API Key: $masked"
+        else
+            echo "Current DCE API Key: (none / not set)"
+        fi
+        echo
+        echo "1) Enter new DCE API Key"
+        echo "2) Clear DCE API Key"
+        echo "0) Cancel"
+        choice=$(ask "Choose: ")
+        case $choice in
+            1)
+                key=$(ask "Enter DCE API Key: ")
+                [[ -z $key ]] && return 0
+                ;;
+            2)
+                key="clear"
+                ;;
+            *) return 0 ;;
+        esac
+    fi
+
+    case ${key,,} in
+        status | show)
+            local curr
+            curr=$(fv_get_dce_api_key)
+            if [[ -n $curr ]]; then
+                local masked="${curr:0:4}****${curr: -4}"
+                (( ${#curr} <= 8 )) && masked="****"
+                echo "FuturesView DCE API Key: $masked"
+            else
+                echo "FuturesView DCE API Key: (none / not set)"
+            fi
+            return 0
+            ;;
+        clear | none | off | delete | del | disable | disabled | 0)
+            key=""
+            ;;
+    esac
+
+    if [[ -n $key && $key =~ [[:cntrl:]] ]]; then
+        err "API key must not contain control characters or newlines"
+    fi
+
+    db_write --arg k "$key" '.settings.futures_view.dce_api_key = $k'
+    fv_sync_env_file
+    install_units
+    if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
+        systemctl daemon-reload
+        if svc_active "$FV_SVC"; then
+            systemctl restart "$FV_SVC" || warn "Failed to restart $FV_SVC with new DCE API key"
+        fi
+    fi
+
+    if [[ -n $key ]]; then
+        ok "FuturesView DCE API key configured successfully!"
+    else
+        ok "FuturesView DCE API key cleared"
+    fi
+}
+
 fv_remove() {
     need_root
     need_installed
@@ -401,7 +521,7 @@ fv_remove() {
 }
 
 futures_view_menu() {
-    local a state cpu_lim cpu_desc
+    local a state cpu_lim cpu_desc dce_k dce_desc
     while true; do
         cls
         state="Not deployed"
@@ -419,26 +539,34 @@ futures_view_menu() {
         else
             cpu_desc="Unlimited"
         fi
+        dce_k=$(fv_get_dce_api_key)
+        if [[ -n $dce_k ]]; then
+            dce_desc="Configured"
+        else
+            dce_desc="Not set"
+        fi
         echo "=== FuturesView Panel ==="
         echo "Status: $state"
         echo
         echo "1) Deploy FuturesView (with auto-generated password)"
         echo "2) Update and rebuild (git pull + npm build)"
         echo "3) View / Change WebUI password"
-        echo "4) Configure CPU rate limit (current: $cpu_desc)"
-        echo "5) Show status and logs"
-        echo "6) Restart service"
-        echo "7) Disable / Remove"
+        echo "4) Configure DCE API key (current: $dce_desc)"
+        echo "5) Configure CPU rate limit (current: $cpu_desc)"
+        echo "6) Show status and logs"
+        echo "7) Restart service"
+        echo "8) Disable / Remove"
         echo "0) Back"
         a=$(ask "Choose: ")
         case $a in
             1) run_locked fv_deploy ;;
             2) run_locked fv_update ;;
             3) run_locked fv_set_password_cmd ;;
-            4) run_locked fv_set_cpu_limit_cmd ;;
-            5) fv_status; echo; show_log fv ;;
-            6) run_locked svc_restart fv ;;
-            7) run_locked fv_remove ;;
+            4) run_locked fv_set_dce_api_key_cmd ;;
+            5) run_locked fv_set_cpu_limit_cmd ;;
+            6) fv_status; echo; show_log fv ;;
+            7) run_locked svc_restart fv ;;
+            8) run_locked fv_remove ;;
             0 | "") return 0 ;;
             *) continue ;;
         esac
@@ -452,13 +580,14 @@ fv_cmd() {
         update | upgrade) shift; fv_update "$@" ;;
         status | s) shift; fv_status "$@" ;;
         password | pwd | pass) shift; fv_set_password_cmd "$@" ;;
+        key | apikey | dce | dce-key | dce_key) shift; fv_set_dce_api_key_cmd "$@" ;;
         cpu | cpulimit | limit) shift; fv_set_cpu_limit_cmd "$@" ;;
         restart) shift; svc_restart fv ;;
         start) shift; svc_start fv ;;
         stop) shift; svc_stop fv ;;
         log) shift; show_log fv ;;
         remove | disable | del) shift; fv_remove "$@" ;;
-        *) err "Usage: vpsm fv [deploy|update|status|password|cpu|restart|log|remove]" ;;
+        *) err "Usage: vpsm fv [deploy|update|status|password|apikey|cpu|restart|log|remove]" ;;
     esac
 }
 
