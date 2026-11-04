@@ -47,18 +47,31 @@ fv_get_dce_api_key() {
     db_get '.settings.futures_view.dce_api_key // ""'
 }
 
+fv_get_dce_secret() {
+    db_get '.settings.futures_view.dce_secret // ""'
+}
+
 fv_sync_env_file() {
     [[ -d $FV_DIR ]] || return 0
-    local key env_file="$FV_DIR/.env" tmp=""
+    local key secret env_file="$FV_DIR/.env" tmp=""
     key=$(fv_get_dce_api_key)
+    secret=$(fv_get_dce_secret)
     if [[ -f $env_file ]]; then
-        tmp=$(grep -v -E '^(DCE_API_KEY|FT_DCE_API_KEY)=' "$env_file" 2>/dev/null || true)
+        tmp=$(grep -v -E '^(DCE_API_KEY|DCE_KEY|FT_DCE_API_KEY|DCE_SECRET|DCE_API_SECRET|FT_DCE_SECRET)=' "$env_file" 2>/dev/null || true)
     fi
-    if [[ -n $key ]]; then
+    if [[ -n $key || -n $secret ]]; then
         {
             [[ -n $tmp ]] && printf '%s\n' "$tmp"
-            printf 'DCE_API_KEY="%s"\n' "$key"
-            printf 'FT_DCE_API_KEY="%s"\n' "$key"
+            if [[ -n $key ]]; then
+                printf 'DCE_API_KEY="%s"\n' "$key"
+                printf 'DCE_KEY="%s"\n' "$key"
+                printf 'FT_DCE_API_KEY="%s"\n' "$key"
+            fi
+            if [[ -n $secret ]]; then
+                printf 'DCE_SECRET="%s"\n' "$secret"
+                printf 'DCE_API_SECRET="%s"\n' "$secret"
+                printf 'FT_DCE_SECRET="%s"\n' "$secret"
+            fi
         } > "$env_file"
         chmod 600 "$env_file" 2>/dev/null || true
     else
@@ -72,7 +85,7 @@ fv_sync_env_file() {
 }
 
 fv_render_unit() {
-    local domain port cpu_limit cpu_opts="" content dce_key env_opts=""
+    local domain port cpu_limit cpu_opts="" content dce_key dce_secret env_opts="" env_lines=()
     domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
     port=$(fv_port 2>/dev/null || echo "8888")
     cpu_limit=$(fv_cpu_limit 2>/dev/null || echo "60")
@@ -80,10 +93,27 @@ fv_render_unit() {
         cpu_opts=$(printf 'CPUQuota=%s%%\nNice=15' "$cpu_limit")
     fi
     dce_key=$(fv_get_dce_api_key 2>/dev/null || echo "")
+    dce_secret=$(fv_get_dce_secret 2>/dev/null || echo "")
     if [[ -n $dce_key ]]; then
         local escaped_k="${dce_key//\\/\\\\}"
         escaped_k="${escaped_k//\"/\\\"}"
-        env_opts=$(printf 'Environment="DCE_API_KEY=%s"\nEnvironment="FT_DCE_API_KEY=%s"' "$escaped_k" "$escaped_k")
+        env_lines+=(
+            "Environment=\"DCE_API_KEY=$escaped_k\""
+            "Environment=\"DCE_KEY=$escaped_k\""
+            "Environment=\"FT_DCE_API_KEY=$escaped_k\""
+        )
+    fi
+    if [[ -n $dce_secret ]]; then
+        local escaped_s="${dce_secret//\\/\\\\}"
+        escaped_s="${escaped_s//\"/\\\"}"
+        env_lines+=(
+            "Environment=\"DCE_SECRET=$escaped_s\""
+            "Environment=\"DCE_API_SECRET=$escaped_s\""
+            "Environment=\"FT_DCE_SECRET=$escaped_s\""
+        )
+    fi
+    if ((${#env_lines[@]} > 0)); then
+        env_opts=$(printf '%s\n' "${env_lines[@]}")
     fi
     content=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/vpsm-futures-view.service")
     if [[ -n $cpu_opts ]]; then
@@ -100,12 +130,13 @@ fv_render_unit() {
 }
 
 fv_status() {
-    local state pid rss="-" domain port pwd cpu_lim dce_k
+    local state pid rss="-" domain port pwd cpu_lim dce_k dce_s
     domain=$(db_get '.settings.domain')
     port=$(fv_port)
     pwd=$(fv_get_password)
     cpu_lim=$(fv_cpu_limit)
     dce_k=$(fv_get_dce_api_key)
+    dce_s=$(fv_get_dce_secret)
     echo "=== FuturesView Panel Status ==="
     echo "Enabled:       $(fv_enabled && echo "yes" || echo "no")"
     echo "Repository:    $FV_DIR $([[ -d $FV_DIR/.git ]] && echo "(git $(git -C "$FV_DIR" rev-parse --short HEAD 2>/dev/null || echo "cloned"))" || echo "(not cloned)")"
@@ -124,12 +155,22 @@ fv_status() {
     else
         echo "CPU limit:     Disabled (unlimited)"
     fi
-    if [[ -n $dce_k ]]; then
+    if [[ -n $dce_k && -n $dce_s ]]; then
         local masked_k="${dce_k:0:4}****${dce_k: -4}"
         (( ${#dce_k} <= 8 )) && masked_k="****"
-        echo "DCE API Key:   Configured ($masked_k)"
+        local masked_s="${dce_s:0:4}****${dce_s: -4}"
+        (( ${#dce_s} <= 8 )) && masked_s="****"
+        echo "DCE Credentials: Configured (Key: $masked_k, Secret: $masked_s)"
+    elif [[ -n $dce_k ]]; then
+        local masked_k="${dce_k:0:4}****${dce_k: -4}"
+        (( ${#dce_k} <= 8 )) && masked_k="****"
+        echo "DCE Credentials: Incomplete (Key: $masked_k, Secret: missing)"
+    elif [[ -n $dce_s ]]; then
+        local masked_s="${dce_s:0:4}****${dce_s: -4}"
+        (( ${#dce_s} <= 8 )) && masked_s="****"
+        echo "DCE Credentials: Incomplete (Key: missing, Secret: configured)"
     else
-        echo "DCE API Key:   Not set"
+        echo "DCE Credentials: Not set"
     fi
     echo "Listen addr:   127.0.0.1:$port"
     echo "WebUI URL:     https://$domain"
@@ -428,74 +469,132 @@ fv_set_cpu_limit_cmd() {
     fi
 }
 
-fv_set_dce_api_key_cmd() {
+fv_set_dce_credentials_cmd() {
     need_root
     need_installed
-    local key=${1:-}
-    if [[ -z $key ]]; then
-        local curr choice
-        curr=$(fv_get_dce_api_key)
-        if [[ -n $curr ]]; then
-            local masked="${curr:0:4}****${curr: -4}"
-            (( ${#curr} <= 8 )) && masked="****"
-            echo "Current DCE API Key: $masked"
-        else
-            echo "Current DCE API Key: (none / not set)"
+    local key="" secret="" arg1=${1:-} arg2=${2:-}
+    local curr_k curr_s masked_k masked_s
+
+    curr_k=$(fv_get_dce_api_key)
+    curr_s=$(fv_get_dce_secret)
+
+    if [[ -z $arg1 ]]; then
+        masked_k="none"
+        if [[ -n $curr_k ]]; then
+            masked_k="${curr_k:0:4}****${curr_k: -4}"
+            (( ${#curr_k} <= 8 )) && masked_k="****"
         fi
+        masked_s="none"
+        if [[ -n $curr_s ]]; then
+            masked_s="${curr_s:0:4}****${curr_s: -4}"
+            (( ${#curr_s} <= 8 )) && masked_s="****"
+        fi
+        echo "=== FuturesView DCE Credentials ==="
+        echo "Current API Key: $masked_k"
+        echo "Current Secret:  $masked_s"
         echo
-        echo "1) Enter new DCE API Key"
-        echo "2) Clear DCE API Key"
+        echo "1) Configure both DCE API Key and Secret"
+        echo "2) Configure DCE API Key only"
+        echo "3) Configure DCE Secret only"
+        echo "4) Clear DCE credentials"
         echo "0) Cancel"
+        local choice
         choice=$(ask "Choose: ")
         case $choice in
             1)
                 key=$(ask "Enter DCE API Key: ")
-                [[ -z $key ]] && return 0
+                secret=$(ask "Enter DCE Secret: ")
+                if [[ -z $key || -z $secret ]]; then
+                    warn "Both API Key and Secret are required by DCE."
+                fi
                 ;;
             2)
-                key="clear"
+                key=$(ask "Enter DCE API Key: ")
+                secret="$curr_s"
+                ;;
+            3)
+                key="$curr_k"
+                secret=$(ask "Enter DCE Secret: ")
+                ;;
+            4)
+                key=""
+                secret=""
                 ;;
             *) return 0 ;;
         esac
+    else
+        case ${arg1,,} in
+            status | show)
+                masked_k="none"
+                if [[ -n $curr_k ]]; then
+                    masked_k="${curr_k:0:4}****${curr_k: -4}"
+                    (( ${#curr_k} <= 8 )) && masked_k="****"
+                fi
+                masked_s="none"
+                if [[ -n $curr_s ]]; then
+                    masked_s="${curr_s:0:4}****${curr_s: -4}"
+                    (( ${#curr_s} <= 8 )) && masked_s="****"
+                fi
+                echo "FuturesView DCE API Key: $masked_k"
+                echo "FuturesView DCE Secret:  $masked_s"
+                return 0
+                ;;
+            clear | none | off | delete | del | disable | disabled | 0)
+                key=""
+                secret=""
+                ;;
+            key | apikey)
+                key=$arg2
+                secret="$curr_s"
+                ;;
+            secret | sec)
+                key="$curr_k"
+                secret=$arg2
+                ;;
+            *)
+                key=$arg1
+                if (($# >= 2)); then
+                    secret=$arg2
+                else
+                    if [[ -t 0 ]]; then
+                        secret=$(ask "Enter DCE Secret (leave blank to keep current): ")
+                        [[ -z $secret ]] && secret="$curr_s"
+                    else
+                        secret="$curr_s"
+                    fi
+                fi
+                ;;
+        esac
     fi
 
-    case ${key,,} in
-        status | show)
-            local curr
-            curr=$(fv_get_dce_api_key)
-            if [[ -n $curr ]]; then
-                local masked="${curr:0:4}****${curr: -4}"
-                (( ${#curr} <= 8 )) && masked="****"
-                echo "FuturesView DCE API Key: $masked"
-            else
-                echo "FuturesView DCE API Key: (none / not set)"
-            fi
-            return 0
-            ;;
-        clear | none | off | delete | del | disable | disabled | 0)
-            key=""
-            ;;
-    esac
-
-    if [[ -n $key && $key =~ [[:cntrl:]] ]]; then
-        err "API key must not contain control characters or newlines"
+    if [[ -n $key && $key =~ [[:cntrl:]] ]] || [[ -n $secret && $secret =~ [[:cntrl:]] ]]; then
+        err "API credentials must not contain control characters or newlines"
     fi
 
-    db_write --arg k "$key" '.settings.futures_view.dce_api_key = $k'
+    db_write --arg k "$key" --arg s "$secret" \
+        '.settings.futures_view.dce_api_key = $k | .settings.futures_view.dce_secret = $s'
     fv_sync_env_file
     install_units
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         systemctl daemon-reload
         if svc_active "$FV_SVC"; then
-            systemctl restart "$FV_SVC" || warn "Failed to restart $FV_SVC with new DCE API key"
+            systemctl restart "$FV_SVC" || warn "Failed to restart $FV_SVC with new DCE credentials"
         fi
     fi
 
-    if [[ -n $key ]]; then
-        ok "FuturesView DCE API key configured successfully!"
+    if [[ -n $key && -n $secret ]]; then
+        ok "FuturesView DCE credentials configured successfully! (API Key and Secret)"
+    elif [[ -n $key ]]; then
+        warn "FuturesView DCE API Key set, but DCE Secret is missing (DCE needs both)"
+    elif [[ -n $secret ]]; then
+        warn "FuturesView DCE Secret set, but DCE API Key is missing (DCE needs both)"
     else
-        ok "FuturesView DCE API key cleared"
+        ok "FuturesView DCE credentials cleared"
     fi
+}
+
+fv_set_dce_api_key_cmd() {
+    fv_set_dce_credentials_cmd "$@"
 }
 
 fv_remove() {
@@ -521,7 +620,7 @@ fv_remove() {
 }
 
 futures_view_menu() {
-    local a state cpu_lim cpu_desc dce_k dce_desc
+    local a state cpu_lim cpu_desc dce_k dce_s dce_desc
     while true; do
         cls
         state="Not deployed"
@@ -540,8 +639,11 @@ futures_view_menu() {
             cpu_desc="Unlimited"
         fi
         dce_k=$(fv_get_dce_api_key)
-        if [[ -n $dce_k ]]; then
+        dce_s=$(fv_get_dce_secret)
+        if [[ -n $dce_k && -n $dce_s ]]; then
             dce_desc="Configured"
+        elif [[ -n $dce_k || -n $dce_s ]]; then
+            dce_desc="Incomplete"
         else
             dce_desc="Not set"
         fi
@@ -551,7 +653,7 @@ futures_view_menu() {
         echo "1) Deploy FuturesView (with auto-generated password)"
         echo "2) Update and rebuild (git pull + npm build)"
         echo "3) View / Change WebUI password"
-        echo "4) Configure DCE API key (current: $dce_desc)"
+        echo "4) Configure DCE API credentials (current: $dce_desc)"
         echo "5) Configure CPU rate limit (current: $cpu_desc)"
         echo "6) Show status and logs"
         echo "7) Restart service"
@@ -562,7 +664,7 @@ futures_view_menu() {
             1) run_locked fv_deploy ;;
             2) run_locked fv_update ;;
             3) run_locked fv_set_password_cmd ;;
-            4) run_locked fv_set_dce_api_key_cmd ;;
+            4) run_locked fv_set_dce_credentials_cmd ;;
             5) run_locked fv_set_cpu_limit_cmd ;;
             6) fv_status; echo; show_log fv ;;
             7) run_locked svc_restart fv ;;
@@ -580,7 +682,7 @@ fv_cmd() {
         update | upgrade) shift; fv_update "$@" ;;
         status | s) shift; fv_status "$@" ;;
         password | pwd | pass) shift; fv_set_password_cmd "$@" ;;
-        key | apikey | dce | dce-key | dce_key) shift; fv_set_dce_api_key_cmd "$@" ;;
+        key | apikey | dce | dce-key | dce_key | credentials | dce-credentials) shift; fv_set_dce_credentials_cmd "$@" ;;
         cpu | cpulimit | limit) shift; fv_set_cpu_limit_cmd "$@" ;;
         restart) shift; svc_restart fv ;;
         start) shift; svc_start fv ;;
