@@ -30,7 +30,7 @@ fv_apply_password() {
     py="$FV_DIR/.venv/bin/python"
     [[ -x $py ]] || return 1
     (
-        cd "$FV_DIR" && "$py" -c "import sys; from web.auth import set_password; set_password(sys.argv[1])" "$pass"
+        cd "$FV_DIR" && FV_NEW_PASS="$pass" "$py" -c "import os; from web.auth import set_password; set_password(os.environ['FV_NEW_PASS'])"
     ) || return 1
     db_write --arg p "$pass" '.settings.futures_view.password = $p'
 }
@@ -51,33 +51,51 @@ fv_get_dce_secret() {
     db_get '.settings.futures_view.dce_secret // ""'
 }
 
+fv_escape_env_val() {
+    local v=$1
+    v=${v//\\/\\\\}
+    v=${v//\"/\\\"}
+    v=${v//\$/\\\$}
+    v=${v//\`/\\\`}
+    printf '%s' "$v"
+}
+
 fv_sync_env_file() {
-    [[ -d $FV_DIR ]] || return 0
-    local key secret env_file="$FV_DIR/.env" tmp=""
+    local key secret env_file="$FV_DIR/.env" tmp="" out_tmp esc_k esc_s
     key=$(fv_get_dce_api_key)
     secret=$(fv_get_dce_secret)
+    if [[ ! -d $FV_DIR ]]; then
+        [[ -n $key || -n $secret ]] || return 0
+        mkdir -p "$FV_DIR"
+    fi
     if [[ -f $env_file ]]; then
         tmp=$(grep -v -E '^(DCE_API_KEY|DCE_KEY|FT_DCE_API_KEY|DCE_SECRET|DCE_API_SECRET|FT_DCE_SECRET)=' "$env_file" 2>/dev/null || true)
     fi
     if [[ -n $key || -n $secret ]]; then
+        esc_k=$(fv_escape_env_val "$key")
+        esc_s=$(fv_escape_env_val "$secret")
+        out_tmp=$(umask 077; mktemp "$FV_DIR/.env.XXXXXX") || return 1
         {
             [[ -n $tmp ]] && printf '%s\n' "$tmp"
             if [[ -n $key ]]; then
-                printf 'DCE_API_KEY="%s"\n' "$key"
-                printf 'DCE_KEY="%s"\n' "$key"
-                printf 'FT_DCE_API_KEY="%s"\n' "$key"
+                printf 'DCE_API_KEY="%s"\n' "$esc_k"
+                printf 'DCE_KEY="%s"\n' "$esc_k"
+                printf 'FT_DCE_API_KEY="%s"\n' "$esc_k"
             fi
             if [[ -n $secret ]]; then
-                printf 'DCE_SECRET="%s"\n' "$secret"
-                printf 'DCE_API_SECRET="%s"\n' "$secret"
-                printf 'FT_DCE_SECRET="%s"\n' "$secret"
+                printf 'DCE_SECRET="%s"\n' "$esc_s"
+                printf 'DCE_API_SECRET="%s"\n' "$esc_s"
+                printf 'FT_DCE_SECRET="%s"\n' "$esc_s"
             fi
-        } > "$env_file"
-        chmod 600 "$env_file" 2>/dev/null || true
+        } > "$out_tmp"
+        chmod 600 "$out_tmp" 2>/dev/null || true
+        mv -f "$out_tmp" "$env_file"
     else
         if [[ -n $tmp ]]; then
-            printf '%s\n' "$tmp" > "$env_file"
-            chmod 600 "$env_file" 2>/dev/null || true
+            out_tmp=$(umask 077; mktemp "$FV_DIR/.env.XXXXXX") || return 1
+            printf '%s\n' "$tmp" > "$out_tmp"
+            chmod 600 "$out_tmp" 2>/dev/null || true
+            mv -f "$out_tmp" "$env_file"
         else
             rm -f "$env_file"
         fi
@@ -85,35 +103,12 @@ fv_sync_env_file() {
 }
 
 fv_render_unit() {
-    local domain port cpu_limit cpu_opts="" content dce_key dce_secret env_opts="" env_lines=()
+    local domain port cpu_limit cpu_opts="" content
     domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
     port=$(fv_port 2>/dev/null || echo "8888")
     cpu_limit=$(fv_cpu_limit 2>/dev/null || echo "60")
     if [[ $cpu_limit =~ ^[1-9][0-9]*$ && $cpu_limit -gt 0 ]]; then
         cpu_opts=$(printf 'CPUQuota=%s%%\nNice=15' "$cpu_limit")
-    fi
-    dce_key=$(fv_get_dce_api_key 2>/dev/null || echo "")
-    dce_secret=$(fv_get_dce_secret 2>/dev/null || echo "")
-    if [[ -n $dce_key ]]; then
-        local escaped_k="${dce_key//\\/\\\\}"
-        escaped_k="${escaped_k//\"/\\\"}"
-        env_lines+=(
-            "Environment=\"DCE_API_KEY=$escaped_k\""
-            "Environment=\"DCE_KEY=$escaped_k\""
-            "Environment=\"FT_DCE_API_KEY=$escaped_k\""
-        )
-    fi
-    if [[ -n $dce_secret ]]; then
-        local escaped_s="${dce_secret//\\/\\\\}"
-        escaped_s="${escaped_s//\"/\\\"}"
-        env_lines+=(
-            "Environment=\"DCE_SECRET=$escaped_s\""
-            "Environment=\"DCE_API_SECRET=$escaped_s\""
-            "Environment=\"FT_DCE_SECRET=$escaped_s\""
-        )
-    fi
-    if ((${#env_lines[@]} > 0)); then
-        env_opts=$(printf '%s\n' "${env_lines[@]}")
     fi
     content=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/vpsm-futures-view.service")
     if [[ -n $cpu_opts ]]; then
@@ -121,11 +116,7 @@ fv_render_unit() {
     else
         content=$(printf '%s\n' "$content" | grep -v '@FV_CPU_OPTS@')
     fi
-    if [[ -n $env_opts ]]; then
-        content="${content//@FV_ENV_OPTS@/$env_opts}"
-    else
-        content=$(printf '%s\n' "$content" | grep -v '@FV_ENV_OPTS@')
-    fi
+    content=$(printf '%s\n' "$content" | grep -v '@FV_ENV_OPTS@')
     printf '%s\n' "$content"
 }
 
@@ -174,7 +165,15 @@ fv_status() {
     fi
     echo "Listen addr:   127.0.0.1:$port"
     echo "WebUI URL:     https://$domain"
-    echo "WebUI Pass:    ${pwd:-"(none / not set)"}"
+    if [[ ${1:-} == --show-password ]]; then
+        echo "WebUI Pass:    ${pwd:-"(none / not set)"}"
+    elif [[ -n $pwd ]]; then
+        local masked_pwd="****"
+        (( ${#pwd} > 8 )) && masked_pwd="${pwd:0:2}****${pwd: -2}"
+        echo "WebUI Pass:    $masked_pwd (run 'vpsm fv password' to view or change)"
+    else
+        echo "WebUI Pass:    (none / not set)"
+    fi
 }
 
 fv_check_prereqs() {
@@ -262,7 +261,7 @@ fv_deploy() {
     if [[ -d $FV_DIR/webui ]]; then
         (
             cd "$FV_DIR/webui"
-            npm install || npm ci || { err "npm install failed in $FV_DIR/webui"; }
+            npm ci || npm install || { err "npm install failed in $FV_DIR/webui"; }
             npm run build || { err "npm run build failed in $FV_DIR/webui"; }
         ) || return 1
     else
@@ -273,7 +272,8 @@ fv_deploy() {
     mkdir -p "$WWW_DIR"
     if [[ -d $FV_DIR/web/static ]]; then
         cp -r "$FV_DIR/web/static/"* "$WWW_DIR/"
-        chmod -R 755 "$WWW_DIR"
+        find "$WWW_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
+        find "$WWW_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
     fi
 
     db_write '.settings.futures_view.enabled = true | if (.settings.futures_view.cpu_limit // null) == null then .settings.futures_view.cpu_limit = 60 else . end'
@@ -336,7 +336,7 @@ fv_update() {
     if [[ -d $FV_DIR/webui ]]; then
         (
             cd "$FV_DIR/webui"
-            npm install || npm ci || { err "npm install failed"; }
+            npm ci || npm install || { err "npm install failed"; }
             npm run build || { err "npm run build failed"; }
         ) || return 1
     fi
@@ -345,7 +345,8 @@ fv_update() {
     mkdir -p "$WWW_DIR"
     if [[ -d $FV_DIR/web/static ]]; then
         cp -r "$FV_DIR/web/static/"* "$WWW_DIR/"
-        chmod -R 755 "$WWW_DIR"
+        find "$WWW_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
+        find "$WWW_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
     fi
 
     fv_sync_env_file
@@ -373,15 +374,15 @@ fv_set_password_cmd() {
         echo "1) Generate a new random high-strength password"
         echo "2) Enter a custom password"
         echo "0) Cancel"
-        choice=$(ask "Choose: ")
+        choice=$(ask "Choose: ") || return 0
         case $choice in
             1) new_p=$(fv_gen_password) || return 1 ;;
             2)
                 if [[ -t 0 ]]; then
-                    read -r -s -p "New password (8-256 characters): " new_p
+                    read -r -s -p "New password (8-256 characters): " new_p || { echo; return 0; }
                     echo
                 else
-                    new_p=$(ask "New password (8-256 characters): ")
+                    new_p=$(ask "New password (8-256 characters): ") || return 0
                 fi
                 ;;
             *) return 0 ;;
@@ -419,11 +420,11 @@ fv_set_cpu_limit_cmd() {
         echo "2) Enter custom CPU limit percentage (e.g. 50% / 70% / 80%)"
         echo "3) Disable CPU limit (allow 100% CPU usage)"
         echo "0) Cancel"
-        choice=$(ask "Choose: ")
+        choice=$(ask "Choose: ") || return 0
         case $choice in
             1) val=60 ;;
             2)
-                val=$(ask "Enter CPU limit percentage (5-1000%): ")
+                val=$(ask "Enter CPU limit percentage (5-1000%): ") || return 0
                 [[ -z $val ]] && return 0
                 ;;
             3) val=0 ;;
@@ -499,22 +500,22 @@ fv_set_dce_credentials_cmd() {
         echo "4) Clear DCE credentials"
         echo "0) Cancel"
         local choice
-        choice=$(ask "Choose: ")
+        choice=$(ask "Choose: ") || return 0
         case $choice in
             1)
-                key=$(ask "Enter DCE API Key: ")
-                secret=$(ask "Enter DCE Secret: ")
+                key=$(ask "Enter DCE API Key: ") || return 0
+                secret=$(ask "Enter DCE Secret: ") || return 0
                 if [[ -z $key || -z $secret ]]; then
                     warn "Both API Key and Secret are required by DCE."
                 fi
                 ;;
             2)
-                key=$(ask "Enter DCE API Key: ")
+                key=$(ask "Enter DCE API Key: ") || return 0
                 secret="$curr_s"
                 ;;
             3)
                 key="$curr_k"
-                secret=$(ask "Enter DCE Secret: ")
+                secret=$(ask "Enter DCE Secret: ") || return 0
                 ;;
             4)
                 key=""
@@ -611,7 +612,7 @@ fv_remove() {
     ok "FuturesView disabled and removed from Caddy routing"
 
     if [[ -d $FV_DIR ]]; then
-        ans=$(ask "Delete the FuturesView directory ($FV_DIR)? [y/N]: ")
+        ans=$(ask "Delete the FuturesView directory ($FV_DIR)? [y/N]: ") || return 0
         if [[ ${ans,,} == y ]]; then
             rm -rf "$FV_DIR"
             ok "Deleted $FV_DIR"
@@ -659,7 +660,7 @@ futures_view_menu() {
         echo "7) Restart service"
         echo "8) Disable / Remove"
         echo "0) Back"
-        a=$(ask "Choose: ")
+        a=$(ask "Choose: ") || return 0
         case $a in
             1) run_locked fv_deploy ;;
             2) run_locked fv_update ;;

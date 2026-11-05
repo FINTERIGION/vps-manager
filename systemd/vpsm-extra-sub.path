@@ -5,6 +5,8 @@ After=vpsm-caddy.service
 [Path]
 PathModified=@ROOT@/caddy/sub.log
 Unit=vpsm-extra-sub.service
+TriggerLimitIntervalSec=60
+TriggerLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target

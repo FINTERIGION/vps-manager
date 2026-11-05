@@ -1,7 +1,6 @@
 [Unit]
 Description=vpsm async external subscription refresh
 After=network-online.target
-StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

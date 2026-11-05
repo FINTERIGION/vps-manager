@@ -130,12 +130,14 @@ fetch_scripts() {
         return 0
     fi
     REF=${REF:-main}
+    [[ $REPO =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "Invalid repository name: $REPO"
+    [[ $REF =~ ^[A-Za-z0-9._/-]+$ && $REF != *..* ]] || die "Invalid git ref: $REF"
     url="https://github.com/$REPO/archive/$REF.tar.gz"
     label="$REPO@$REF"
     DL_TMP=$(mktemp -d) || die "Failed to create temporary directory"
     trap 'rm -rf "$DL_TMP"' EXIT
     echo "Downloading scripts $label ..."
-    curl -fsSL --retry 3 --connect-timeout 15 --max-time 600 -o "$DL_TMP/s.tgz" "$url" || die "Failed to download scripts"
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 600 -o "$DL_TMP/s.tgz" "$url" || die "Failed to download scripts"
     tar -xzf "$DL_TMP/s.tgz" -C "$DL_TMP" --strip-components=1 || die "Failed to extract scripts"
     [[ -f $DL_TMP/src/core.sh && -f $DL_TMP/vpsm.sh && -d $DL_TMP/templates && -d $DL_TMP/systemd ]] ||
         die "Downloaded scripts are incomplete ($label)"

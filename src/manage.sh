@@ -18,6 +18,7 @@ install_units() {
         fi
         [[ -f $dst && $(<"$dst") == "$new" ]] && continue
         printf '%s\n' "$new" >"$dst"
+        chmod 644 "$dst"
         UNITS_CHANGED+=" $u"
     done
     for f in /etc/systemd/system/vpsm-*.service /etc/systemd/system/vpsm-*.timer /etc/systemd/system/vpsm-*.path; do
@@ -224,6 +225,8 @@ update_sh() {
     [[ -n $arg ]] && ref=$arg
     ref=${ref:-main}
     [[ $ref == latest ]] && ref=main
+    [[ $repo =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || err "Invalid repository name: $repo"
+    [[ $ref =~ ^[A-Za-z0-9._/-]+$ && $ref != *..* ]] || err "Invalid git ref: $ref"
     url="https://github.com/$repo/archive/$ref.tar.gz"
     label="$repo@$ref"
     tmp=$(mktemp -d)
@@ -294,7 +297,7 @@ update_cmd() {
 }
 
 update_kernel() {
-    local yes=${1:-} ans pm
+    local yes=${1:-} pm
     echo "Running kernel: $(uname -r)"
     if cmd_exists apt-get; then
         pm=apt
@@ -306,10 +309,7 @@ update_kernel() {
         err "Unsupported package manager; use your distribution's standard kernel update procedure"
     fi
     msg "System packages and kernel will be updated safely from configured repositories without removing existing packages. No reboot will be performed."
-    if [[ $yes != -y && $yes != --yes && -t 0 ]]; then
-        read -r -p "Continue with the package and kernel update? [y/N] " ans
-        [[ $ans == y || $ans == Y ]] || { msg "Cancelled"; return 0; }
-    fi
+    confirm_or_yes "Continue with the package and kernel update?" "$yes" || return 0
     [[ -n ${VPSM_NO_SERVICE:-} ]] && { msg "(dry run, skipped) update packages and kernel using $pm"; return 0; }
     case $pm in
         apt)
@@ -345,11 +345,9 @@ EOF
 }
 
 do_uninstall() {
-    local ans
-    if [[ ${1:-} != -y && ${1:-} != --yes && -t 0 ]]; then
-        read -r -p "Uninstall vpsm (deletes all config and user data under $ROOT)? [y/N] " ans
-        [[ $ans == y || $ans == Y ]] || { msg "Cancelled"; return 0; }
-    fi
+    [[ -n $ROOT && $ROOT == /* && $ROOT != / && -f $ROOT/users.json ]] ||
+        err "Refusing to uninstall from invalid or uninitialized root directory: ${ROOT:-empty}"
+    confirm_or_yes "Uninstall vpsm (deletes all config and user data under $ROOT)?" "${1:-}" || return 0
     svc disable --now vpsm-traffic.timer 2>/dev/null
     svc disable --now vpsm-extra-sub.path 2>/dev/null
     svc disable --now "$XRAY_SVC" 2>/dev/null

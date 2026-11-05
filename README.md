@@ -15,18 +15,18 @@ It provides an interactive menu and direct subcommands for:
 Requirements: a systemd-based Linux VPS with root access and a domain whose A record points to the VPS.
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/FINTERIGION/vps-manager/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/FINTERIGION/vps-manager/main/install.sh)
 ```
 
-After installation, run `sudo vpsm` to open the menu.
+After installation, run `vpsm` to open the menu.
 
 ## Compatibility
 
 To keep using Shadowrocket, downgrade the server to a release before v26.9.8:
 
 ```bash
-sudo vpsm update xray v26.7.28
-sudo vpsm regen
+vpsm update xray v26.7.28
+vpsm regen
 ```
 
 ## Disclaimer

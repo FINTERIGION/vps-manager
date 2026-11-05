@@ -26,12 +26,12 @@ extra_sub_list() {
 }
 
 extra_sub_check_filter() {
-    python3 "$SH_DIR/src/extra_sub.py" check-filter "${1:-}" ||
+    timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-filter "${1:-}" ||
         err "Invalid filter regular expression: ${1:-}"
 }
 
 extra_sub_check_url() {
-    python3 "$SH_DIR/src/extra_sub.py" check-url "${1:-}" ||
+    timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-url "${1:-}" ||
         err "Invalid or forbidden subscription URL (cannot point to private, loopback, or cloud metadata addresses)"
 }
 
@@ -39,14 +39,14 @@ extra_sub_fetch() {
     local alias=$1 url=$2 filter=${3:-} force=${4:-} dest_dir=${5:-$SUB_EXTRA}
     local stamp="$dest_dir/$alias.stamp" tmp size rc
     [[ $url =~ ^https?:// ]] || { warn "External subscription $alias has an invalid URL"; return 1; }
-    python3 "$SH_DIR/src/extra_sub.py" check-url "$url" >/dev/null 2>&1 || {
+    timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-url "$url" >/dev/null 2>&1 || {
         warn "External subscription $alias has a forbidden URL (loopback or private address)"
         return 1
     }
     tmp=$(mktemp -d "$ROOT/.extra.XXXXXX") || return 1
     # Providers often block unknown clients, so always present a Clash/Mihomo UA
     rc=0
-    curl -fSL --retry 2 --connect-timeout 10 --max-time 45 \
+    curl -fSL --max-redirs 3 --retry 2 --connect-timeout 10 --max-time 45 \
         --max-filesize "$EXTRA_MAX_BYTES" --proto '=http,https' --proto-redir '=http,https' \
         -A "$EXTRA_UA" -o "$tmp/source.yaml" "$url" || rc=$?
     if ((rc != 0)); then
@@ -66,14 +66,14 @@ extra_sub_fetch() {
         warn "External subscription $alias is empty or too large"
         return 1
     fi
-    if ! python3 "$SH_DIR/src/extra_sub.py" normalize "$tmp/source.yaml" "$filter" \
+    if ! timeout 20 python3 "$SH_DIR/src/extra_sub.py" normalize "$tmp/source.yaml" "$filter" \
         "$tmp/proxies.yaml" "$tmp/names.yaml"; then
         rm -rf "$tmp"
         warn "External subscription $alias was rejected"
         return 1
     fi
     # Refuse a provider update that renames a node onto the local node, keeping the last good cache
-    if ! python3 "$SH_DIR/src/extra_sub.py" check-names "$tmp/names.yaml" "$(local_proxy_name)"; then
+    if ! timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-names "$tmp/names.yaml" "$(local_proxy_name)"; then
         rm -rf "$tmp"
         warn "External subscription $alias conflicts with the local node name"
         return 1
@@ -108,6 +108,7 @@ extra_sub_attach() {
         ( sub_regen force ) || warn "Subscriptions were not regenerated after rolling back $alias"
         err "External subscription $alias was not attached"
     fi
+    rm -f "$EXTRA_REFRESH_STAMP"
     ok "External subscription $alias attached, every user now sees its nodes"
 }
 
@@ -135,7 +136,7 @@ extra_sub_detach() {
         err "External subscription $alias was not detached"
     fi
     rm -rf "$bak"
-    rm -f "$db_snap"
+    rm -f "$db_snap" "$EXTRA_REFRESH_STAMP"
     ok "External subscription $alias detached from every user"
 }
 
@@ -165,7 +166,7 @@ extra_sub_set_filter() {
         err "Filter for external subscription $alias was not changed"
     fi
     rm -rf "$bak"
-    rm -f "$db_snap"
+    rm -f "$db_snap" "$EXTRA_REFRESH_STAMP"
     ok "Filter for external subscription $alias set to ${filter:-none}, every user is affected"
 }
 
@@ -191,13 +192,22 @@ extra_sub_refresh() {
 }
 
 extra_sub_async_refresh() {
-    local count
+    local force=${1:-} count now last
     count=$(extra_sub_count)
     ((count > 0)) || return 0
 
     mkdir -p "$ROOT"
     exec 8>"$EXTRA_LOCK_FILE"
     flock -n 8 || return 0
+
+    if [[ $force != force && -f $EXTRA_REFRESH_STAMP ]] && ((EXTRA_REFRESH_MIN > 0)); then
+        now=$(date +%s)
+        last=$(stat -c %Y "$EXTRA_REFRESH_STAMP" 2>/dev/null || echo 0)
+        if ((now - last < EXTRA_REFRESH_MIN)); then
+            return 0
+        fi
+    fi
+    touch "$EXTRA_REFRESH_STAMP" 2>/dev/null || true
 
     local tmp alias url filter changed=""
     tmp=$(mktemp -d "$ROOT/.extra.async.XXXXXX") || return 1
@@ -245,7 +255,7 @@ extra_sub_assert_local_name() {
     local candidate=$1 file
     for file in "$SUB_EXTRA"/*.names.yaml; do
         [[ -e $file ]] || continue
-        python3 "$SH_DIR/src/extra_sub.py" check-names "$file" "$candidate" || return 1
+        timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-names "$file" "$candidate" || return 1
     done
 }
 
@@ -262,7 +272,7 @@ extra_sub_stage() {
         cat "$SUB_EXTRA/$alias.proxies.yaml" >>"$out/proxies"
         cat "$SUB_EXTRA/$alias.names.yaml" >>"$out/names"
     done < <(db_get '.settings.extra_subs[]?.alias')
-    python3 "$SH_DIR/src/extra_sub.py" check-names "$out/names" "$(local_proxy_name)"
+    timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-names "$out/names" "$(local_proxy_name)"
 }
 
 # Move caches from the retired per-user layout ($SUB_EXTRA/<user>/<alias>.*) to the shared layout

@@ -556,6 +556,7 @@ unset _lib
 # FuturesView functionality tests
 assert_eq "false" "$(fv_enabled && echo true || echo false)" "FuturesView is disabled by default"
 assert_file_contains "$CADDYFILE" "$CADDY_SUB_LOG" "Caddyfile configures subscription access log"
+assert_file_contains "$CADDYFILE" 'request>uri replace "/sub/[REDACTED]"' "Caddyfile redacts subscription token in logs"
 assert_file_contains "$CADDYFILE" "log_skip @not_sub" "Caddyfile skips non-subscription logs"
 assert_file_not_contains "$CADDYFILE" "handle /api/*" "Caddyfile has no FuturesView API proxy by default"
 assert_file_contains "$CADDYFILE" "try_files {path} /index.html" "Caddyfile has SPA fallback"
@@ -650,11 +651,12 @@ fv_set_dce_credentials_cmd "test-dce-key-abc12345" "test-dce-secret-xyz67890" >/
 assert_eq "test-dce-key-abc12345" "$(fv_get_dce_api_key)" "fv_set_dce_credentials_cmd updates DCE API key"
 assert_eq "test-dce-secret-xyz67890" "$(fv_get_dce_secret)" "fv_set_dce_credentials_cmd updates DCE secret"
 fv_rendered=$(fv_render_unit)
-[[ $fv_rendered == *'Environment="DCE_API_KEY=test-dce-key-abc12345"'* && \
-   $fv_rendered == *'Environment="DCE_SECRET=test-dce-secret-xyz67890"'* && \
-   $fv_rendered == *'Environment="FT_DCE_API_KEY=test-dce-key-abc12345"'* && \
-   $fv_rendered == *'Environment="FT_DCE_SECRET=test-dce-secret-xyz67890"'* ]] &&
-    ok_test "FuturesView unit renders configured DCE credentials" || fail_test "FuturesView unit renders configured DCE credentials"
+[[ $fv_rendered != *"DCE_API_KEY"* && $fv_rendered != *"DCE_SECRET"* ]] &&
+    ok_test "FuturesView unit does not leak plaintext DCE credentials" ||
+    fail_test "FuturesView unit does not leak plaintext DCE credentials"
+assert_file_contains "$FV_DIR/.env" 'DCE_API_KEY="test-dce-key-abc12345"' "DCE API key is written to protected .env file"
+assert_file_contains "$FV_DIR/.env" 'DCE_SECRET="test-dce-secret-xyz67890"' "DCE secret is written to protected .env file"
+assert_eq "600" "$(stat -c %a "$FV_DIR/.env")" "FuturesView .env file has 0600 permissions"
 
 fv_status_dce_set=$(fv_status)
 [[ $fv_status_dce_set == *"DCE Credentials: Configured (Key: test****2345, Secret: test****7890)"* ]] &&
@@ -663,10 +665,9 @@ fv_status_dce_set=$(fv_status)
 fv_set_dce_credentials_cmd clear >/dev/null 2>&1
 assert_eq "" "$(fv_get_dce_api_key)" "fv_set_dce_credentials_cmd clear resets DCE API key"
 assert_eq "" "$(fv_get_dce_secret)" "fv_set_dce_credentials_cmd clear resets DCE secret"
-fv_rendered=$(fv_render_unit)
-[[ $fv_rendered != *"DCE_API_KEY"* && $fv_rendered != *"DCE_SECRET"* && $fv_rendered != *"@FV_ENV_OPTS@"* ]] &&
-    ok_test "cleared DCE credentials removes environment option and leaves no placeholder" ||
-    fail_test "cleared DCE credentials removes environment option and leaves no placeholder"
+[[ ! -f "$FV_DIR/.env" ]] &&
+    ok_test "cleared DCE credentials removes .env file when empty" ||
+    fail_test "cleared DCE credentials removes .env file when empty"
 
 db_write '.settings.futures_view.enabled = false'
 caddy_gen
@@ -722,6 +723,38 @@ menu_bad_rules=$(printf '%s\n' "$menu_output" | awk -v w="$menu_panel_width" 'su
 assert_eq 0 "$menu_bad_rules" "every category rule spans the panel width"
 assert_file_contains "$PROJECT/README.md" "## Disclaimer" "README retains the disclaimer heading"
 assert_file_contains "$PROJECT/README.md" "The authors accept no liability for any misuse" "README retains the full disclaimer"
+
+# Security hardening regression tests
+if timeout 2 bash "$PROJECT/vpsm.sh" </dev/null >/dev/null 2>&1; then
+    ok_test "menu exits cleanly on stdin EOF without spinning"
+else
+    fail_test "menu exits cleanly on stdin EOF without spinning"
+fi
+if ( do_uninstall </dev/null ) >/dev/null 2>&1; then
+    fail_test "non-interactive uninstall without -y is refused"
+else
+    ok_test "non-interactive uninstall without -y is refused"
+fi
+[[ -f $DB ]] && ok_test "refused uninstall preserves database" || fail_test "refused uninstall preserves database"
+if ( fw_enable </dev/null ) >/dev/null 2>&1; then
+    fail_test "non-interactive fw_enable without -y is refused"
+else
+    ok_test "non-interactive fw_enable without -y is refused"
+fi
+
+printf 'DOMAIN-SUFFIX,good.example.com,Proxy\n' >"$CUSTOM_RULES"
+sub_regen force >/dev/null 2>&1
+bad_editor="$TMP/bad-editor.sh"
+printf '#!/usr/bin/env bash\nprintf "[\n" >"$1"\n' >"$bad_editor"
+chmod 755 "$bad_editor"
+if ( EDITOR="$bad_editor" edit_rules ) >/dev/null 2>&1; then
+    fail_test "edit_rules rejects invalid YAML rules"
+else
+    ok_test "edit_rules rejects invalid YAML rules"
+fi
+assert_file_contains "$CUSTOM_RULES" "good.example.com" "edit_rules restores previous valid rules on failure"
+: >"$CUSTOM_RULES"
+sub_regen force >/dev/null 2>&1
 
 printf '\n%d tests passed, %d failed\n' "$PASS" "$FAIL"
 ((FAIL == 0))

@@ -4,6 +4,7 @@
 import ipaddress
 import math
 import re
+import signal
 import socket
 import sys
 import urllib.parse
@@ -14,10 +15,13 @@ import yaml
 
 MAX_PROXIES = 500
 MAX_FILTER_LENGTH = 200
+MAX_VALUE_DEPTH = 20
+MAX_YAML_EVENTS = 25000
 DISALLOWED_PROXY_KEYS = {"plugin", "plugin-opts", "dialer-proxy"}
 DANGEROUS_REGEX_PATTERNS = [
     re.compile(r"(\+|\*|\{[0-9,]+\})\s*(\+|\*|\{[0-9,]+\})"),
     re.compile(r"\([^)]*(\+|\*|\{[0-9,]+\})[^)]*\)\s*(\+|\*|\{[0-9,]+\})"),
+    re.compile(r"\([^)]*\|[^)]*\)\s*(\+|\*|\{[0-9,]+\})"),
 ]
 ALLOWED_TYPES = {
     "anytls",
@@ -63,8 +67,11 @@ def fail(message):
 def is_forbidden_ip(ip_str):
     try:
         ip = ipaddress.ip_address(ip_str)
+        if getattr(ip, "ipv4_mapped", None) is not None:
+            ip = ip.ipv4_mapped
         return (
-            ip.is_loopback
+            not ip.is_global
+            or ip.is_loopback
             or ip.is_private
             or ip.is_link_local
             or ip.is_reserved
@@ -102,7 +109,9 @@ def check_url(url):
         pass
 
 
-def validate_value(value, path="proxy"):
+def validate_value(value, path="proxy", depth=0):
+    if depth > MAX_VALUE_DEPTH:
+        fail(f"{path} exceeds maximum nesting depth ({MAX_VALUE_DEPTH})")
     if value is None or isinstance(value, (str, bool, int)):
         return
     if isinstance(value, float):
@@ -111,21 +120,28 @@ def validate_value(value, path="proxy"):
         return
     if isinstance(value, list):
         for index, item in enumerate(value):
-            validate_value(item, f"{path}[{index}]")
+            validate_value(item, f"{path}[{index}]", depth + 1)
         return
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str):
                 fail(f"{path} contains a non-string key")
-            validate_value(item, f"{path}.{key}")
+            validate_value(item, f"{path}.{key}", depth + 1)
         return
     fail(f"{path} contains unsupported YAML data")
 
 
 def load_document(path):
     try:
-        with Path(path).open("r", encoding="utf-8") as handle:
-            document = yaml.safe_load(handle)
+        text = Path(path).read_text(encoding="utf-8")
+        event_count = 0
+        for event in yaml.parse(text):
+            event_count += 1
+            if event_count > MAX_YAML_EVENTS:
+                fail("the YAML document is too complex")
+            if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None) is not None:
+                fail("YAML anchors and aliases are not permitted")
+        document = yaml.safe_load(text)
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         fail(f"cannot parse Clash/Mihomo YAML: {exc}")
     if not isinstance(document, dict) or not isinstance(document.get("proxies"), list):
@@ -242,6 +258,9 @@ def check_names(path, local_name):
 
 
 def main():
+    if hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, lambda _s, _f: (_ for _ in ()).throw(SubscriptionError("operation timed out")))
+        signal.alarm(15)
     try:
         if len(sys.argv) == 6 and sys.argv[1] == "normalize":
             write_normalized(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])

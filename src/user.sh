@@ -487,7 +487,12 @@ regen_all() {
 }
 
 edit_rules() {
-    if [[ ! -f $CUSTOM_RULES ]]; then
+    local bak="" had_rules=""
+    if [[ -f $CUSTOM_RULES ]]; then
+        had_rules=1
+        bak=$(mktemp "$ROOT/.rules.bak.XXXXXX") || err "Failed to back up custom rules"
+        cp -p "$CUSTOM_RULES" "$bak" || { rm -f "$bak"; err "Failed to back up custom rules"; }
+    else
         cat >"$CUSTOM_RULES" <<'EOF'
 # Custom Clash rules, one per line, inserted before all built-in rules (highest priority)
 # Available policy groups: Proxy / AI / Google / Steam / Final / DIRECT / REJECT
@@ -499,6 +504,14 @@ edit_rules() {
 EOF
     fi
     "${EDITOR:-vi}" "$CUSTOM_RULES"
-    run_locked sub_regen force || return 1
+    if ! run_locked sub_regen force; then
+        if [[ -n $had_rules ]]; then
+            mv -f "$bak" "$CUSTOM_RULES"
+        else
+            rm -f "$CUSTOM_RULES" "$bak"
+        fi
+        err "Custom rules produced invalid subscription YAML; reverted to previous rules"
+    fi
+    rm -f "$bak"
     ok "Subscriptions updated, takes effect after clients refresh"
 }

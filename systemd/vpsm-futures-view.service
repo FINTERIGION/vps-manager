@@ -10,7 +10,6 @@ WorkingDirectory=@ROOT@/futures-view
 EnvironmentFile=-@ROOT@/futures-view/.env
 Environment=FT_WEB_ALLOWED_HOSTS=127.0.0.1,localhost,@DOMAIN@
 Environment=FT_WEB_ALLOWED_ORIGINS=https://@DOMAIN@,http://@DOMAIN@
-@FV_ENV_OPTS@
 ExecStart=@ROOT@/futures-view/.venv/bin/python main.py web --host 127.0.0.1 --port @PORT@
 # Hardening that leaves every filesystem write path untouched, so backtesting is
 # unaffected. Dropping to a non-root user with ProtectSystem=strict is deferred

@@ -11,8 +11,8 @@ for _lib in xray traffic extra_sub sub caddy user firewall security manage futur
 done
 unset _lib
 
-pause() { read -r -s -n 1 -p "Press any key to return..." _ && echo; }
-ask() { local v; read -r -p "$1" v; printf '%s\n' "$v"; }
+pause() { read -r -s -n 1 -p "Press any key to return..." _ && echo || echo; }
+ask() { local v; read -r -p "$1" v || return 130; printf '%s\n' "$v"; }
 cls() { [[ -t 1 ]] && clear; }
 pick_user() {
     run_locked user_list >&2
@@ -32,12 +32,12 @@ firewall_menu() {
         echo "4) Remove a custom allowed port"
         echo "5) Reload rules"
         echo "0) Back"
-        a=$(ask "Choose: ")
+        a=$(ask "Choose: ") || return 0
         case $a in
             1) run_locked firewall_cmd on ;;
             2) run_locked firewall_cmd off ;;
-            3) p=$(ask "Port (e.g. 8080, 53/udp, 10000-20000/udp): "); run_locked firewall_cmd allow "$p" ;;
-            4) p=$(ask "Port to remove: "); run_locked firewall_cmd deny "$p" ;;
+            3) p=$(ask "Port (e.g. 8080, 53/udp, 10000-20000/udp): ") || return 0; run_locked firewall_cmd allow "$p" ;;
+            4) p=$(ask "Port to remove: ") || return 0; run_locked firewall_cmd deny "$p" ;;
             5) run_locked firewall_cmd reload ;;
             0 | "") return 0 ;;
             *) continue ;;
@@ -56,9 +56,9 @@ swap_menu() {
         echo "1) Create or resize managed swap"
         echo "2) Disable managed swap"
         echo "0) Back"
-        a=$(ask "Choose: ")
+        a=$(ask "Choose: ") || return 0
         case $a in
-            1) size=$(ask "Swap size (e.g. 1G / 512M): "); run_locked swap_set "$size" ;;
+            1) size=$(ask "Swap size (e.g. 1G / 512M): ") || return 0; run_locked swap_set "$size" ;;
             2) run_locked swap_off ;;
             0 | "") return 0 ;;
             *) continue ;;
@@ -84,16 +84,16 @@ node_settings_menu() {
         echo "8) Change Reality shortId"
         echo "9) Toggle UDP forwarding ($(udp_enabled && echo Enabled || echo Disabled))"
         echo "0) Back"
-        a=$(ask "Choose: ")
+        a=$(ask "Choose: ") || return 0
         case $a in
-            1) value=$(ask "Node name (0 = domain): "); run_locked set_node_name "$value" ;;
-            2) value=$(ask "Profile name (0 = follow node name): "); run_locked set_sub_name "$value" ;;
-            3) value=$(ask "Domain: "); run_locked set_domain "$value" ;;
-            4) value=$(ask "Xray port: "); run_locked set_port "$value" ;;
-            5) value=$(ask "Global expiry (YYYY-MM-DD / 30d / +30d / 0): "); run_locked set_expire "$value" ;;
-            6) value=$(ask "Monthly reset day (1-28): "); run_locked set_reset_day "$value" ;;
+            1) value=$(ask "Node name (0 = domain): ") || return 0; run_locked set_node_name "$value" ;;
+            2) value=$(ask "Profile name (0 = follow node name): ") || return 0; run_locked set_sub_name "$value" ;;
+            3) value=$(ask "Domain: ") || return 0; run_locked set_domain "$value" ;;
+            4) value=$(ask "Xray port: ") || return 0; run_locked set_port "$value" ;;
+            5) value=$(ask "Global expiry (YYYY-MM-DD / 30d / +30d / 0): ") || return 0; run_locked set_expire "$value" ;;
+            6) value=$(ask "Monthly reset day (1-28): ") || return 0; run_locked set_reset_day "$value" ;;
             7) run_locked set_key ;;
-            8) value=$(ask "shortId (empty = random): "); run_locked set_shortid "$value" ;;
+            8) value=$(ask "shortId (empty = random): ") || return 0; run_locked set_shortid "$value" ;;
             9) run_locked set_udp ;;
             0 | "") return 0 ;;
             *) continue ;;
@@ -118,23 +118,23 @@ users_menu() {
         echo "7) Disable user"
         echo "8) Rotate subscription token"
         echo "0) Back"
-        a=$(ask "Choose: ")
+        a=$(ask "Choose: ") || return 0
         case $a in
             1)
-                name=$(ask "Username: ")
-                quota=$(ask "Monthly traffic (e.g. 200G, 0=unlimited) [0]: ")
+                name=$(ask "Username: ") || return 0
+                quota=$(ask "Monthly traffic (e.g. 200G, 0=unlimited) [0]: ") || return 0
                 run_locked user_add "$name" "${quota:-0}"
                 ;;
-            2) name=$(pick_user); [[ -n $name ]] && run_locked user_del "$name" ;;
-            3) name=$(pick_user); [[ -n $name ]] && run_locked user_info "$name" ;;
+            2) name=$(pick_user) || return 0; [[ -n $name ]] && run_locked user_del "$name" ;;
+            3) name=$(pick_user) || return 0; [[ -n $name ]] && run_locked user_info "$name" ;;
             4)
-                name=$(pick_user); quota=$(ask "New quota (e.g. 200G, 0=unlimited): ")
+                name=$(pick_user) || return 0; quota=$(ask "New quota (e.g. 200G, 0=unlimited): ") || return 0
                 [[ -n $name ]] && run_locked user_quota "$name" "$quota"
                 ;;
-            5) name=$(pick_user "Username (or all): "); [[ -n $name ]] && run_locked user_reset "$name" ;;
-            6) name=$(pick_user); [[ -n $name ]] && run_locked user_enable "$name" ;;
-            7) name=$(pick_user); [[ -n $name ]] && run_locked user_disable "$name" ;;
-            8) name=$(pick_user); [[ -n $name ]] && run_locked user_token "$name" ;;
+            5) name=$(pick_user "Username (or all): ") || return 0; [[ -n $name ]] && run_locked user_reset "$name" ;;
+            6) name=$(pick_user) || return 0; [[ -n $name ]] && run_locked user_enable "$name" ;;
+            7) name=$(pick_user) || return 0; [[ -n $name ]] && run_locked user_disable "$name" ;;
+            8) name=$(pick_user) || return 0; [[ -n $name ]] && run_locked user_token "$name" ;;
             0 | "") return 0 ;;
             *) continue ;;
         esac
@@ -155,19 +155,19 @@ external_menu() {
         echo "4) Refresh one subscription"
         echo "5) Refresh all subscriptions"
         echo "0) Back"
-        a=$(ask "Choose: ")
+        a=$(ask "Choose: ") || return 0
         case $a in
             1)
-                alias=$(ask "Alias: "); url=$(ask "Clash/Mihomo URL: ")
-                filter=$(ask "Node filter regex (empty = all nodes): ")
+                alias=$(ask "Alias: ") || return 0; url=$(ask "Clash/Mihomo URL: ") || return 0
+                filter=$(ask "Node filter regex (empty = all nodes): ") || return 0
                 run_locked extra_sub_attach "$alias" "$url" "$filter"
                 ;;
-            2) alias=$(ask "Alias: "); run_locked extra_sub_detach "$alias" ;;
+            2) alias=$(ask "Alias: ") || return 0; run_locked extra_sub_detach "$alias" ;;
             3)
-                alias=$(ask "Alias: "); filter=$(ask "Filter regex (0 = clear): ")
+                alias=$(ask "Alias: ") || return 0; filter=$(ask "Filter regex (0 = clear): ") || return 0
                 run_locked extra_sub_set_filter "$alias" "$filter"
                 ;;
-            4) alias=$(ask "Alias: "); run_locked extra_sub_refresh "$alias" force ;;
+            4) alias=$(ask "Alias: ") || return 0; run_locked extra_sub_refresh "$alias" force ;;
             5) run_locked extra_sub_refresh all force ;;
             0 | "") return 0 ;;
             *) continue ;;
@@ -178,13 +178,13 @@ external_menu() {
 
 subscription_menu() {
     local name answer
-    name=$(pick_user)
+    name=$(pick_user) || return 0
     [[ -n $name ]] || return 0
     echo
     echo "Clash subscription: $(sub_url "$name")"
     echo "VLESS share link:   $(vless_share_url "$name")"
     echo
-    answer=$(ask "Show subscription QR code? [y/N]: ")
+    answer=$(ask "Show subscription QR code? [y/N]: ") || return 0
     [[ ${answer,,} == y ]] && user_qr "$name"
 }
 
@@ -204,7 +204,7 @@ services_menu() {
         echo "7) Follow FuturesView log"
         echo "8) Show traffic sync log"
         echo "0) Back"
-        a=$(ask "Choose: ")
+        a=$(ask "Choose: ") || return 0
         case $a in
             1) run_locked svc_restart all ;;
             2) run_locked svc_restart xray ;;
@@ -229,7 +229,7 @@ core_update_menu() {
     echo "2) Update Caddy"
     echo "3) Update both"
     echo "0) Back"
-    a=$(ask "Choose: ")
+    a=$(ask "Choose: ") || return 0
     case $a in
         1) run_locked update_core ;;
         2) run_locked update_caddy ;;
@@ -298,9 +298,9 @@ menu() {
         menu_center System "$width"
         printf '%s\n' "${system[@]}"
         printf '%s\n' "$(printf '%*s' "$width" '' | tr ' ' '=')"
-        choice=$(ask "Choose: ")
+        choice=$(ask "Choose: ") || exit 0
         case $choice in
-            1) choice=$(ask "New SSH port: "); run_locked ssh_change_port "$choice" ;;
+            1) choice=$(ask "New SSH port: ") || exit 0; run_locked ssh_change_port "$choice" ;;
             2) firewall_menu; continue ;;
             3) swap_menu; continue ;;
             4) show_node_info ;;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.4.3"
+VPSM_VERSION="1.4.4"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -35,6 +35,8 @@ SUB_INFO_REFRESH=21600
 CERT_STAMP="$ROOT/.cert_stamp"
 CERT_CHECK_INTERVAL=21600
 CERT_WARN_DAYS=15
+EXTRA_REFRESH_STAMP="$ROOT/.extra_refresh_stamp"
+EXTRA_REFRESH_MIN=${VPSM_EXTRA_REFRESH_MIN:-1800}
 EXTRA_UA=${VPSM_EXTRA_UA:-clash-verge/v2.0.0 mihomo/1.18.0}
 
 API_PORT=10085
@@ -67,6 +69,15 @@ err() {
 need_root() { [[ $EUID -eq 0 || -n ${VPSM_NO_SERVICE:-} ]] || err "Please run as root"; }
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 port_in_use() { cmd_exists ss && ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
+
+confirm_or_yes() {
+    local prompt=$1 flag=${2:-} ans
+    [[ $flag == -y || $flag == --yes ]] && return 0
+    [[ -t 0 ]] || err "Non-interactive session: re-run with -y to confirm"
+    read -r -p "$prompt [y/N] " ans || { echo; msg "Cancelled"; return 1; }
+    [[ $ans == y || $ans == Y ]] || { msg "Cancelled"; return 1; }
+    return 0
+}
 
 svc() {
     if [[ -n ${VPSM_NO_SERVICE:-} ]]; then
@@ -105,6 +116,7 @@ db_write() {
         rm -f "$tmp"
     else
         chmod 600 "$tmp"
+        sync "$tmp" 2>/dev/null || true
         mv -f "$tmp" "$DB"
     fi
 }
@@ -272,7 +284,7 @@ sub_url() {
     fi
 }
 
-dl() { curl -fsSL --retry 3 --connect-timeout 15 --max-time 600 -o "$2" "$1"; }
+dl() { curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 600 -o "$2" "$1"; }
 verify_sum() {
     local want=${2,,} got
     [[ $want =~ ^[0-9a-f]{64}([0-9a-f]{64})?$ ]] || return 1

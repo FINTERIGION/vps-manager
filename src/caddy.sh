@@ -172,12 +172,19 @@ $domain:$CADDY_PORT {
 			roll_size 1MiB
 			roll_keep 1
 		}
+		format filter {
+			wrap json
+			fields {
+				request>uri replace "/sub/[REDACTED]"
+			}
+		}
 	}
 	@not_sub not path /sub/*
 	log_skip @not_sub
 	import site
 	import $CADDY_USERS/*.conf
 ${fv_handle}	handle {
+		log_skip
 		try_files {path} /index.html
 		file_server
 	}

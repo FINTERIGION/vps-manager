@@ -94,14 +94,58 @@ class ExternalSubscriptionTests(unittest.TestCase):
     def test_catastrophic_backtracking_filter_is_rejected(self):
         with self.assertRaises(SubscriptionError):
             compile_filter("^(a+)+$")
+        with self.assertRaises(SubscriptionError):
+            compile_filter("^(a|aa)+$")
 
     def test_forbidden_urls_are_rejected(self):
+        for bad_url in (
+            "http://127.0.0.1:10085/sub",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://100.100.100.200/latest/meta-data/",
+            "http://100.64.0.1/sub",
+            "http://[::ffff:127.0.0.1]:10085/sub",
+            "http://192.0.0.192/sub",
+            "http://localhost:8080/sub",
+        ):
+            with self.subTest(url=bad_url):
+                with self.assertRaises(SubscriptionError):
+                    check_url(bad_url)
+
+    def test_yaml_anchors_and_aliases_are_rejected(self):
+        alias_yaml = self.root / "alias.yaml"
+        alias_yaml.write_text(
+            "proxies:\n"
+            "  - &base\n"
+            "    name: Node1\n"
+            "    type: ss\n"
+            "    server: 1.2.3.4\n"
+            "    port: 8388\n"
+            "  - <<: *base\n"
+            "    name: Node2\n",
+            encoding="utf-8",
+        )
         with self.assertRaises(SubscriptionError):
-            check_url("http://127.0.0.1:10085/sub")
+            normalize(alias_yaml)
+
+    def test_excessive_nesting_depth_is_rejected(self):
+        deep_yaml = self.root / "deep.yaml"
+        nested = "a"
+        for _ in range(25):
+            nested = [nested]
+        doc = {
+            "proxies": [
+                {
+                    "name": "Deep",
+                    "type": "ss",
+                    "server": "1.2.3.4",
+                    "port": 8388,
+                    "ws-opts": nested,
+                }
+            ]
+        }
+        deep_yaml.write_text(yaml.safe_dump(doc), encoding="utf-8")
         with self.assertRaises(SubscriptionError):
-            check_url("http://169.254.169.254/latest/meta-data/")
-        with self.assertRaises(SubscriptionError):
-            check_url("http://localhost:8080/sub")
+            normalize(deep_yaml)
 
     def test_proxy_with_disallowed_plugin_is_rejected(self):
         bad_yaml = self.root / "plugin.yaml"

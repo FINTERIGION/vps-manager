@@ -155,9 +155,7 @@ fw_apply() {
     fw_rules 4 | fw_load iptables "$FW_CHAIN" INPUT || return 1
     if fw_has_v6; then
         if ! cmd_exists ip6tables; then
-            warn "ip6tables not found, IPv6 inbound traffic is NOT filtered"
-            fw_flush_input
-            return 1
+            warn "ip6tables not found; IPv4 rules are loaded, but IPv6 inbound traffic is NOT filtered"
         elif ! fw_rules 6 | fw_load ip6tables "$FW_CHAIN" INPUT; then
             warn "Failed to load IPv6 firewall rules, IPv6 inbound traffic is NOT filtered"
             fw_flush_input
@@ -174,8 +172,13 @@ fw_guard_apply() {
 }
 fw_guard_ensure() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
-    cmd_exists iptables || return 0
-    fw_loaded iptables "$FW_OUT_CHAIN" OUTPUT || fw_guard_apply >/dev/null 2>&1
+    if ! cmd_exists iptables; then
+        warn "iptables is not installed; Xray API port $API_PORT is not guarded against local non-root users"
+        return 0
+    fi
+    if ! fw_loaded iptables "$FW_OUT_CHAIN" OUTPUT; then
+        fw_guard_apply >/dev/null 2>&1 || warn "Failed to load the Xray API guard rule on port $API_PORT"
+    fi
     systemctl is-enabled --quiet "$FW_SVC" 2>/dev/null || systemctl enable --quiet "$FW_SVC" 2>/dev/null
     return 0
 }
@@ -247,10 +250,7 @@ fw_enable() {
     done
     msg "Only these inbound ports will be allowed, everything else will be rejected (ping stays allowed):"
     fw_list
-    if [[ ${1:-} != -y && ${1:-} != --yes && -t 0 ]]; then
-        read -r -p "Make sure your SSH port is listed above. Enable the firewall? [y/N] " ans
-        [[ $ans == y || $ans == Y ]] || { msg "Cancelled"; return 0; }
-    fi
+    confirm_or_yes "Make sure your SSH port is listed above. Enable the firewall?" "${1:-}" || return 0
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         for s in ufw firewalld; do
             systemctl is-active --quiet "$s" && warn "$s is running; its rules also apply and may block ports allowed here"
