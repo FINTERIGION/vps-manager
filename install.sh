@@ -269,7 +269,7 @@ fi
 fix_perms
 
 if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
-    systemctl enable --now "$FW_SVC" vpsm-traffic.timer
+    systemctl enable --now "$FW_SVC" vpsm-traffic.timer vpsm-extra-sub.path
     systemctl enable "$XRAY_SVC" "$CADDY_SVC"
     if [[ -n $XRAY_WAS_ACTIVE ]]; then
         traffic_pull || traffic_pull || warn "Failed to persist Xray traffic before restart"

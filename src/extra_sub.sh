@@ -36,11 +36,8 @@ extra_sub_check_url() {
 }
 
 extra_sub_fetch() {
-    local alias=$1 url=$2 filter=${3:-} force=${4:-} stamp="$SUB_EXTRA/$1.stamp" tmp size rc age
-    if [[ -z $force && -f $stamp && -f $SUB_EXTRA/$alias.proxies.yaml && -f $SUB_EXTRA/$alias.names.yaml ]]; then
-        age=$(($(date +%s) - $(stat -c %Y "$stamp")))
-        ((age < EXTRA_REFRESH)) && return 0
-    fi
+    local alias=$1 url=$2 filter=${3:-} force=${4:-} dest_dir=${5:-$SUB_EXTRA}
+    local stamp="$dest_dir/$alias.stamp" tmp size rc
     [[ $url =~ ^https?:// ]] || { warn "External subscription $alias has an invalid URL"; return 1; }
     python3 "$SH_DIR/src/extra_sub.py" check-url "$url" >/dev/null 2>&1 || {
         warn "External subscription $alias has a forbidden URL (loopback or private address)"
@@ -81,12 +78,12 @@ extra_sub_fetch() {
         warn "External subscription $alias conflicts with the local node name"
         return 1
     fi
-    mkdir -p "$SUB_EXTRA"
-    chmod 700 "$SUB_EXTRA"
-    install -m 600 "$tmp/proxies.yaml" "$SUB_EXTRA/$alias.proxies.yaml.new"
-    install -m 600 "$tmp/names.yaml" "$SUB_EXTRA/$alias.names.yaml.new"
-    mv -f "$SUB_EXTRA/$alias.proxies.yaml.new" "$SUB_EXTRA/$alias.proxies.yaml"
-    mv -f "$SUB_EXTRA/$alias.names.yaml.new" "$SUB_EXTRA/$alias.names.yaml"
+    mkdir -p "$dest_dir"
+    [[ $dest_dir == "$SUB_EXTRA" ]] && chmod 700 "$SUB_EXTRA"
+    install -m 600 "$tmp/proxies.yaml" "$dest_dir/$alias.proxies.yaml.new"
+    install -m 600 "$tmp/names.yaml" "$dest_dir/$alias.names.yaml.new"
+    mv -f "$dest_dir/$alias.proxies.yaml.new" "$dest_dir/$alias.proxies.yaml"
+    mv -f "$dest_dir/$alias.names.yaml.new" "$dest_dir/$alias.names.yaml"
     touch "$stamp"
     chmod 600 "$stamp"
     rm -rf "$tmp"
@@ -186,13 +183,62 @@ extra_sub_refresh() {
         [[ $before != "$after" ]] && changed=1
     done < <(db_get --arg a "$target" '.settings.extra_subs[]? | select($a == "all" or .alias == $a)
         | "\(.alias)\t\(.url)\t\(.filter // "")"')
-    if [[ $force == force ]]; then
-        sub_regen force || rc=1
-    elif [[ -n $changed ]]; then
-        # Force a full render on the next regeneration so new nodes reach clients right away
+    if [[ $force == force || -n $changed ]]; then
         rm -f "$SUB_STAMP"
+        sub_regen force || rc=1
     fi
     return "$rc"
+}
+
+extra_sub_async_refresh() {
+    local count
+    count=$(extra_sub_count)
+    ((count > 0)) || return 0
+
+    mkdir -p "$ROOT"
+    exec 8>"$EXTRA_LOCK_FILE"
+    flock -n 8 || return 0
+
+    local tmp alias url filter changed=""
+    tmp=$(mktemp -d "$ROOT/.extra.async.XXXXXX") || return 1
+
+    while IFS=$'\t' read -r alias url filter; do
+        [[ -n $alias && -n $url ]] || continue
+        if extra_sub_fetch "$alias" "$url" "$filter" force "$tmp"; then
+            if ! cmp -s "$tmp/$alias.proxies.yaml" "$SUB_EXTRA/$alias.proxies.yaml" 2>/dev/null || \
+               ! cmp -s "$tmp/$alias.names.yaml" "$SUB_EXTRA/$alias.names.yaml" 2>/dev/null; then
+                changed=1
+            fi
+        fi
+    done < <(db_get '.settings.extra_subs[]? | "\(.alias)\t\(.url)\t\(.filter // "")"')
+
+    if [[ -z $changed ]]; then
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    (
+        acquire_lock || exit 1
+        mkdir -p "$SUB_EXTRA"
+        chmod 700 "$SUB_EXTRA"
+        local updated="" f b alias
+        for f in "$tmp"/*.proxies.yaml; do
+            [[ -e $f ]] || continue
+            b=${f##*/}
+            alias=${b%.proxies.yaml}
+            extra_sub_exists "$alias" || continue
+            install -m 600 "$tmp/$alias.proxies.yaml" "$SUB_EXTRA/$alias.proxies.yaml"
+            install -m 600 "$tmp/$alias.names.yaml" "$SUB_EXTRA/$alias.names.yaml"
+            install -m 600 "$tmp/$alias.stamp" "$SUB_EXTRA/$alias.stamp"
+            updated=1
+        done
+        if [[ -n $updated ]]; then
+            rm -f "$SUB_STAMP"
+            sub_regen force || warn "Subscriptions were not regenerated after async refresh"
+        fi
+    )
+    rm -rf "$tmp"
+    return 0
 }
 
 extra_sub_assert_local_name() {

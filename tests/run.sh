@@ -333,12 +333,30 @@ else
     ok_test "a filter without matches is rejected"
 fi
 
-: >"$SUB_STAMP"
-touch -d '13 hours ago' "$SUB_EXTRA/provider.stamp"
-extra_sub_refresh all
-[[ ! -e $SUB_STAMP ]] && ok_test "a due refresh invalidates the full-render stamp" ||
-    fail_test "a due refresh invalidates the full-render stamp"
-sub_regen force
+extra_sub_set_filter provider '^Tokyo'
+python3 -c '
+import yaml
+with open("'"$PROJECT/tests/fixtures/valid.yaml"'") as f:
+    d = yaml.safe_load(f)
+d["proxies"].append({"name": "Tokyo-New", "type": "ss", "server": "1.2.3.4", "port": 8388, "cipher": "aes-128-gcm", "password": "test"})
+with open("'"$TMP/custom_sub.yaml"'", "w") as f:
+    yaml.safe_dump(d, f)
+'
+export FIXTURE="$TMP/custom_sub.yaml"
+sync_all >/dev/null 2>&1
+assert_file_not_contains "$alice_yaml" "Tokyo-New" "sync_all does not perform timed refresh of external subscriptions"
+
+extra_sub_async_refresh >/dev/null 2>&1
+assert_file_contains "$alice_yaml" "Tokyo-New" "async refresh updates subscription for the next request"
+
+cache="$SUB_EXTRA/provider.proxies.yaml"
+before=$(sha256sum "$cache" | awk '{print $1}')
+CURL_STUB_FAIL=1 extra_sub_async_refresh >/dev/null 2>&1
+after=$(sha256sum "$cache" | awk '{print $1}')
+assert_eq "$before" "$after" "failed async refresh keeps the last valid cache"
+
+export FIXTURE="$PROJECT/tests/fixtures/valid.yaml"
+extra_sub_set_filter provider '^Tokyo$'
 
 cache="$SUB_EXTRA/provider.proxies.yaml"
 before=$(sha256sum "$cache" | awk '{print $1}')
@@ -537,6 +555,8 @@ unset _lib
 
 # FuturesView functionality tests
 assert_eq "false" "$(fv_enabled && echo true || echo false)" "FuturesView is disabled by default"
+assert_file_contains "$CADDYFILE" "$CADDY_SUB_LOG" "Caddyfile configures subscription access log"
+assert_file_contains "$CADDYFILE" "log_skip @not_sub" "Caddyfile skips non-subscription logs"
 assert_file_not_contains "$CADDYFILE" "handle /api/*" "Caddyfile has no FuturesView API proxy by default"
 assert_file_contains "$CADDYFILE" "try_files {path} /index.html" "Caddyfile has SPA fallback"
 

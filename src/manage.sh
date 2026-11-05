@@ -4,7 +4,7 @@
 install_units() {
     UNITS_CHANGED=""
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
-    local units=(vpsm-xray.service vpsm-caddy.service vpsm-traffic.service vpsm-traffic.timer vpsm-firewall.service vpsm-futures-view.service)
+    local units=(vpsm-xray.service vpsm-caddy.service vpsm-traffic.service vpsm-traffic.timer vpsm-firewall.service vpsm-futures-view.service vpsm-extra-sub.service vpsm-extra-sub.path)
     local u dst new f base domain port
     domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
     port=$(fv_port 2>/dev/null || echo "8888")
@@ -20,7 +20,7 @@ install_units() {
         printf '%s\n' "$new" >"$dst"
         UNITS_CHANGED+=" $u"
     done
-    for f in /etc/systemd/system/vpsm-*.service /etc/systemd/system/vpsm-*.timer; do
+    for f in /etc/systemd/system/vpsm-*.service /etc/systemd/system/vpsm-*.timer /etc/systemd/system/vpsm-*.path; do
         [[ -e $f ]] || continue
         base=${f##*/}
         [[ " ${units[*]} " == *" $base "* ]] && continue
@@ -41,6 +41,7 @@ restart_changed_units() {
             vpsm-futures-view.service) fv_enabled && svc_active "$FV_SVC" && svc restart "$FV_SVC" && ok "Restarted $FV_SVC (unit updated)" ;;
             vpsm-traffic.timer) svc try-restart vpsm-traffic.timer ;;
             vpsm-firewall.service) svc try-restart "$FW_SVC" ;;
+            vpsm-extra-sub.path) svc try-restart vpsm-extra-sub.path ;;
         esac
     done
     return 0
@@ -350,6 +351,7 @@ do_uninstall() {
         [[ $ans == y || $ans == Y ]] || { msg "Cancelled"; return 0; }
     fi
     svc disable --now vpsm-traffic.timer 2>/dev/null
+    svc disable --now vpsm-extra-sub.path 2>/dev/null
     svc disable --now "$XRAY_SVC" 2>/dev/null
     svc disable --now "$CADDY_SVC" 2>/dev/null
     svc disable --now "$FV_SVC" 2>/dev/null
@@ -365,7 +367,7 @@ do_uninstall() {
         ok "Uninstalled (dry run)"
         return 0
     fi
-    rm -f /etc/systemd/system/vpsm-{xray,caddy,traffic,firewall,futures-view}.service /etc/systemd/system/vpsm-traffic.timer
+    rm -f /etc/systemd/system/vpsm-{xray,caddy,traffic,firewall,futures-view,extra-sub}.service /etc/systemd/system/vpsm-{traffic.timer,extra-sub.path}
     rm -f /usr/local/bin/vpsm /etc/sysctl.d/99-vpsm-bbr.conf
     systemctl daemon-reload
     userdel "$SVC_USER" 2>/dev/null

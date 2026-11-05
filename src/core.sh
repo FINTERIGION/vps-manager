@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.4.2"
+VPSM_VERSION="1.4.3"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -19,10 +19,12 @@ SUB_EXTRA="$ROOT/sub-extra"
 WWW_DIR="$ROOT/www"
 CADDY_DIR="$ROOT/caddy"
 CADDY_USERS="$CADDY_DIR/users"
+CADDY_SUB_LOG="$CADDY_DIR/sub.log"
 CADDYFILE="$CADDY_DIR/Caddyfile"
 CADDY_ADMIN_SOCK="$CADDY_DIR/run/admin.sock"
 CUSTOM_RULES="$ROOT/clash-custom-rules.yaml"
 LOCK_FILE="$ROOT/.lock"
+EXTRA_LOCK_FILE="$ROOT/.extra_lock"
 SUB_STAMP="$ROOT/.sub_stamp"
 SUB_RELOAD_PENDING="$ROOT/.sub_reload_pending"
 SUB_INFO_STAMP="$ROOT/.sub_info_stamp"
@@ -33,7 +35,6 @@ SUB_INFO_REFRESH=21600
 CERT_STAMP="$ROOT/.cert_stamp"
 CERT_CHECK_INTERVAL=21600
 CERT_WARN_DAYS=15
-EXTRA_REFRESH=43200
 EXTRA_UA=${VPSM_EXTRA_UA:-clash-verge/v2.0.0 mihomo/1.18.0}
 
 API_PORT=10085
@@ -396,6 +397,10 @@ fix_perms() {
     svc_dir "$CADDY_DIR"
     svc_dir "$CADDY_USERS"
     [[ -f $CADDYFILE ]] && chown "root:$SVC_USER" "$CADDYFILE" && chmod 640 "$CADDYFILE"
+    if [[ -f $CADDY_SUB_LOG ]]; then
+        chown "$SVC_USER:$SVC_USER" "$CADDY_SUB_LOG" 2>/dev/null || true
+        chmod 640 "$CADDY_SUB_LOG"
+    fi
     mkdir -p "$CADDY_DIR/data" "$CADDY_DIR/config" "${CADDY_ADMIN_SOCK%/*}"
     find "$CADDY_DIR/data" "$CADDY_DIR/config" "${CADDY_ADMIN_SOCK%/*}" \
         \( ! -user "$SVC_USER" -o ! -group "$SVC_USER" \) -exec chown "$SVC_USER:$SVC_USER" {} + 2>/dev/null

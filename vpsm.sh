@@ -404,6 +404,7 @@ main() {
         udp) run_locked set_udp "$@" ;;
         rules) edit_rules ;;
         fv | futures-view) run_locked fv_cmd "$@" ;;
+        extra-refresh) extra_sub_async_refresh ;;
         regen) run_locked regen_all ;;
         sync) run_locked sync_all ;;
         status | s) show_status ;;

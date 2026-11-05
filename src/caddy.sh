@@ -99,6 +99,7 @@ caddy_stale() {
     fi
     grep -qF "$want" "$CADDYFILE" || return 0
     grep -qF "$domain:$CADDY_PORT" "$CADDYFILE" || return 0
+    grep -qF "$CADDY_SUB_LOG" "$CADDYFILE" || return 0
     if fv_enabled; then
         grep -qF "127.0.0.1:$(fv_port)" "$CADDYFILE" || return 0
     else
@@ -117,6 +118,8 @@ caddy_gen() {
     chmod 755 "$WWW_DIR"
     svc_dir "$CADDY_DIR"
     svc_dir "$CADDY_USERS"
+    touch "$CADDY_SUB_LOG"
+    chmod 640 "$CADDY_SUB_LOG"
 
     if [[ ! -f $WWW_DIR/index.html ]] || grep -qF "$CADDY_OLD_INDEX" "$WWW_DIR/index.html"; then
         if fv_enabled; then
@@ -164,6 +167,14 @@ $domain:$CADDY_PORT {
 			disable_tlsalpn_challenge
 		}
 	}
+	log {
+		output file $CADDY_SUB_LOG {
+			roll_size 1MiB
+			roll_keep 1
+		}
+	}
+	@not_sub not path /sub/*
+	log_skip @not_sub
 	import site
 	import $CADDY_USERS/*.conf
 ${fv_handle}	handle {

@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch subscription requests to trigger external subscription refresh
+After=vpsm-caddy.service
+
+[Path]
+PathModified=@ROOT@/caddy/sub.log
+Unit=vpsm-extra-sub.service
+
+[Install]
+WantedBy=multi-user.target
+

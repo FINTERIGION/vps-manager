@@ -211,7 +211,9 @@ PY
             [[ -e $f ]] || continue
             b=${f##*/}
             if ! cmp -s "$f" "$SUB_DIR/$b"; then
-                install -m 644 "$f" "$SUB_DIR/$b" ||
+                install -m 644 "$f" "$SUB_DIR/.$b.tmp" ||
+                    { rm -rf "$stage"; warn "Failed to install subscription $b"; return 1; }
+                mv -f "$SUB_DIR/.$b.tmp" "$SUB_DIR/$b" ||
                     { rm -rf "$stage"; warn "Failed to install subscription $b"; return 1; }
             fi
         done
