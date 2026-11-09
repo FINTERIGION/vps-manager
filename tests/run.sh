@@ -115,6 +115,10 @@ assert_file_contains "$XRAY_CONF" '"network": "udp"' "Xray routing matches UDP n
 assert_file_contains "$XRAY_CONF" '"domainStrategy": "ForceIPv4"' "Xray outbound defaults to IPv4"
 assert_file_contains "$alice_yaml" "ip-version: ipv4" "Clash node defaults to IPv4"
 assert_file_contains "$alice_yaml" "AND,((DST-PORT,443),(NETWORK,UDP)),REJECT" "Clash rules reject QUIC"
+assert_file_contains "$alice_yaml" "name: WebRTC" "Clash YAML includes WebRTC policy group"
+assert_file_contains "$alice_yaml" "DST-PORT,19302-19309,WebRTC" "Clash rules route STUN traffic to WebRTC group"
+assert_file_not_contains "$alice_yaml" "name: AI" "Clash YAML omits removed AI policy group"
+assert_file_not_contains "$alice_yaml" "name: Google" "Clash YAML omits removed Google policy group"
 assert_file_contains "$alice_yaml" "udp: true" "Clash node defaults to udp: true"
 
 set_udp false

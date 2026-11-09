@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.4.4"
+VPSM_VERSION="1.5.0"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -199,7 +199,7 @@ is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
 valid_node_name() {
     [[ -n $1 && ${#1} -le 64 && $1 != *[\"\\[:cntrl:]]* ]] || return 1
     case $1 in
-        DIRECT | REJECT | REJECT-DROP | PASS | COMPATIBLE | GLOBAL | Proxy | Proxy-DNS | AI | Google | Steam | Final) return 1 ;;
+        DIRECT | REJECT | REJECT-DROP | PASS | COMPATIBLE | GLOBAL | Proxy | Proxy-DNS | Steam | WebRTC | Final) return 1 ;;
     esac
 }
 

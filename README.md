@@ -2,7 +2,7 @@
 
 A lightweight Bash CLI for securing a VPS and running a multi-user **VLESS + Reality + Vision** service with [Xray](https://github.com/XTLS/Xray-core) and [Caddy](https://github.com/caddyserver/caddy).
 
-It provides an interactive menu and direct subcommands for:
+It provides an interactive menu and direct subcommands for
 - SSH port changes with validation and firewall coordination
 - A dedicated iptables inbound whitelist and swap file management
 - One-command VLESS + Reality + Vision deployment
@@ -19,15 +19,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/FINTERIGION/vps-manager/main
 ```
 
 After installation, run `vpsm` to open the menu.
-
-## Compatibility
-
-To keep using Shadowrocket, downgrade the server to a release before v26.9.8:
-
-```bash
-vpsm update xray v26.7.28
-vpsm regen
-```
 
 ## Disclaimer
 

@@ -41,18 +41,17 @@ ALLOWED_TYPES = {
     "wireguard",
 }
 RESERVED_NAMES = {
-    "AI",
     "COMPATIBLE",
     "DIRECT",
     "Final",
     "GLOBAL",
-    "Google",
     "PASS",
     "Proxy",
     "Proxy-DNS",
     "REJECT",
     "REJECT-DROP",
     "Steam",
+    "WebRTC",
 }
 
 

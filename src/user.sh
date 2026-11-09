@@ -495,11 +495,10 @@ edit_rules() {
     else
         cat >"$CUSTOM_RULES" <<'EOF'
 # Custom Clash rules, one per line, inserted before all built-in rules (highest priority)
-# Available policy groups: Proxy / AI / Google / Steam / Final / DIRECT / REJECT
+# Available policy groups: Proxy / Steam / WebRTC / Final / DIRECT / REJECT
 # Examples:
 # DOMAIN-SUFFIX,example.com,Proxy
-# DOMAIN-SUFFIX,openai.com,AI
-# DOMAIN-SUFFIX,googleapis.cn,Google
+# DOMAIN-SUFFIX,steampowered.com,Steam
 # IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
 EOF
     fi

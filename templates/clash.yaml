@@ -70,13 +70,17 @@ dns:
 sniffer:
   enable: true
   force-dns-mapping: true
-  override-destination: true
   parse-pure-ip: true
+  override-destination: false
   sniff:
     TLS:
       ports: [443, 8443]
     HTTP:
       ports: [80, 8080-8880]
+      override-destination: true
+  skip-domain:
+    - "Mijia Cloud"
+    - "+.push.apple.com"
 
 proxies:
   - name: "__NODE__"  # vpsm-local
@@ -104,23 +108,17 @@ proxy-groups:
       - "__NODE__"
       # __EXTRA_NAMES__
       - DIRECT
-  - name: AI
-    type: select
-    proxies:
-      - Proxy
-      - "__NODE__"
-      # __EXTRA_NAMES__
-      - DIRECT
-  - name: Google
-    type: select
-    proxies:
-      - Proxy
-      - "__NODE__"
-      # __EXTRA_NAMES__
-      - DIRECT
   - name: Steam
     type: select
     proxies:
+      - Proxy
+      - DIRECT
+      - "__NODE__"
+      # __EXTRA_NAMES__
+  - name: WebRTC
+    type: select
+    proxies:
+      - REJECT
       - Proxy
       - DIRECT
       - "__NODE__"
@@ -251,6 +249,19 @@ rules:
   # __SERVER_RULES__
   - DST-PORT,853,REJECT
   - AND,((DST-PORT,443),(NETWORK,UDP)),REJECT
+  - DST-PORT,3478,WebRTC
+  - DST-PORT,5349,WebRTC
+  - DST-PORT,19302-19309,WebRTC
+  - DOMAIN-REGEX,(^|\.)(stun|turn|stuns|turns)[0-9]*\.,WebRTC
+  - DOMAIN-SUFFIX,stun.l.google.com,WebRTC
+  - DOMAIN-SUFFIX,stun1.l.google.com,WebRTC
+  - DOMAIN-SUFFIX,stun2.l.google.com,WebRTC
+  - DOMAIN-SUFFIX,stun3.l.google.com,WebRTC
+  - DOMAIN-SUFFIX,stun4.l.google.com,WebRTC
+  - DOMAIN-SUFFIX,stun.cloudflare.com,WebRTC
+  - DOMAIN-SUFFIX,stun.twilio.com,WebRTC
+  - DOMAIN-SUFFIX,stun.nextcloud.com,WebRTC
+  - DOMAIN-SUFFIX,stunprotocol.org,WebRTC
   - IP-CIDR,8.8.8.8/32,Proxy,no-resolve
   - IP-CIDR,8.8.4.4/32,Proxy,no-resolve
   - IP-CIDR,1.1.1.1/32,Proxy,no-resolve
@@ -263,6 +274,7 @@ rules:
   - RULE-SET,private,DIRECT
   - RULE-SET,lancidr,DIRECT,no-resolve
   - GEOIP,LAN,DIRECT,no-resolve
+  - RULE-SET,reject,REJECT
   - DOMAIN-SUFFIX,steampowered.com,Steam
   - DOMAIN-SUFFIX,steamcommunity.com,Steam
   - DOMAIN-SUFFIX,steamstatic.com,Steam
@@ -290,52 +302,63 @@ rules:
   - DOMAIN-SUFFIX,telesco.pe,Proxy
   - DOMAIN-SUFFIX,tdesktop.com,Proxy
   - DOMAIN-KEYWORD,telegram,Proxy
-  - DOMAIN-SUFFIX,googleapis.cn,Google
-  - DOMAIN-SUFFIX,xn--ngstr-lra8j.com,Google
-  - DOMAIN,dl.google.com,Google
-  - DOMAIN,dl.l.google.com,Google
-  - DOMAIN,c.android.clients.google.com,Google
-  - DOMAIN,update.googleapis.com,Google
-  - DOMAIN,connectivitycheck.gstatic.com,Google
-  - DOMAIN,checkin.gstatic.com,Google
-  - DOMAIN-SUFFIX,gvt1.com,Google
-  - DOMAIN-SUFFIX,gvt2.com,Google
-  - DOMAIN-SUFFIX,gvt3.com,Google
-  - DOMAIN-SUFFIX,googleapis.com,Google
-  - DOMAIN-SUFFIX,googleusercontent.com,Google
-  - DOMAIN-SUFFIX,google.com,Google
-  - DOMAIN-SUFFIX,gstatic.com,Google
-  - DOMAIN-SUFFIX,ggpht.com,Google
-  - DOMAIN-SUFFIX,android.com,Google
-  - DOMAIN-SUFFIX,googleplay.com,Google
-  - DOMAIN-KEYWORD,googleplay,Google
-  - DOMAIN-SUFFIX,gemini.google,Google
-  - DOMAIN-SUFFIX,deepmind.google,Google
-  - DOMAIN-SUFFIX,labs.google,Google
-  - DOMAIN-SUFFIX,notebooklm.google,Google
-  - DOMAIN-SUFFIX,jules.google,Google
-  - DOMAIN-SUFFIX,antigravity.google,Google
-  - DOMAIN-SUFFIX,generativeai.google,Google
-  - DOMAIN-SUFFIX,ai.google.dev,Google
-  - RULE-SET,googlefcm,Google
-  - RULE-SET,google,Google
-  - DOMAIN-SUFFIX,anthropic.com,AI
-  - DOMAIN-SUFFIX,claude.ai,AI
-  - DOMAIN-SUFFIX,claude.com,AI
-  - DOMAIN-SUFFIX,claudeusercontent.com,AI
-  - DOMAIN-SUFFIX,openai.com,AI
-  - DOMAIN-SUFFIX,chatgpt.com,AI
-  - DOMAIN-SUFFIX,oaistatic.com,AI
-  - DOMAIN-SUFFIX,oaiusercontent.com,AI
-  - DOMAIN-SUFFIX,x.ai,AI
-  - IP-CIDR,160.79.104.0/21,AI,no-resolve
-  - RULE-SET,anthropic,AI
-  - RULE-SET,openai,AI
-  - RULE-SET,ai,AI
-  - RULE-SET,reject,REJECT
-  - RULE-SET,direct,DIRECT
+  - DOMAIN-SUFFIX,googleapis.cn,Proxy
+  - DOMAIN-SUFFIX,xn--ngstr-lra8j.com,Proxy
+  - DOMAIN,dl.google.com,Proxy
+  - DOMAIN,dl.l.google.com,Proxy
+  - DOMAIN,c.android.clients.google.com,Proxy
+  - DOMAIN,update.googleapis.com,Proxy
+  - DOMAIN,connectivitycheck.gstatic.com,Proxy
+  - DOMAIN,checkin.gstatic.com,Proxy
+  - DOMAIN-SUFFIX,gvt1.com,Proxy
+  - DOMAIN-SUFFIX,gvt2.com,Proxy
+  - DOMAIN-SUFFIX,gvt3.com,Proxy
+  - DOMAIN-SUFFIX,googleapis.com,Proxy
+  - DOMAIN-SUFFIX,googleusercontent.com,Proxy
+  - DOMAIN-SUFFIX,google.com,Proxy
+  - DOMAIN-SUFFIX,gstatic.com,Proxy
+  - DOMAIN-SUFFIX,ggpht.com,Proxy
+  - DOMAIN-SUFFIX,android.com,Proxy
+  - DOMAIN-SUFFIX,googleplay.com,Proxy
+  - DOMAIN-KEYWORD,googleplay,Proxy
+  - DOMAIN-SUFFIX,gemini.google,Proxy
+  - DOMAIN-SUFFIX,deepmind.google,Proxy
+  - DOMAIN-SUFFIX,labs.google,Proxy
+  - DOMAIN-SUFFIX,notebooklm.google,Proxy
+  - DOMAIN-SUFFIX,jules.google,Proxy
+  - DOMAIN-SUFFIX,antigravity.google,Proxy
+  - DOMAIN-SUFFIX,generativeai.google,Proxy
+  - DOMAIN-SUFFIX,ai.google.dev,Proxy
+  - RULE-SET,googlefcm,Proxy
+  - RULE-SET,google,Proxy
+  - DOMAIN-SUFFIX,anthropic.com,Proxy
+  - DOMAIN-SUFFIX,claude.ai,Proxy
+  - DOMAIN-SUFFIX,claude.com,Proxy
+  - DOMAIN-SUFFIX,clau.de,Proxy
+  - DOMAIN-SUFFIX,claudeusercontent.com,Proxy
+  - DOMAIN-SUFFIX,openai.com,Proxy
+  - DOMAIN-SUFFIX,chatgpt.com,Proxy
+  - DOMAIN-SUFFIX,oaistatic.com,Proxy
+  - DOMAIN-SUFFIX,oaiusercontent.com,Proxy
+  - DOMAIN-SUFFIX,x.ai,Proxy
+  - DOMAIN-SUFFIX,stripe.com,Proxy
+  - DOMAIN-SUFFIX,stripecdn.com,Proxy
+  - DOMAIN-SUFFIX,stripe.network,Proxy
+  - DOMAIN-SUFFIX,statsig.com,Proxy
+  - DOMAIN-SUFFIX,statsigapi.net,Proxy
+  - DOMAIN-SUFFIX,featuregates.org,Proxy
+  - DOMAIN-SUFFIX,intercom.io,Proxy
+  - DOMAIN-SUFFIX,intercomcdn.com,Proxy
+  - DOMAIN-SUFFIX,arkoselabs.com,Proxy
+  - DOMAIN-SUFFIX,funcaptcha.com,Proxy
+  - IP-CIDR,160.79.104.0/21,Proxy,no-resolve
+  - IP-CIDR6,2607:6bc0::/48,Proxy,no-resolve
+  - RULE-SET,anthropic,Proxy
+  - RULE-SET,openai,Proxy
+  - RULE-SET,ai,Proxy
   - RULE-SET,proxy,Proxy
   - RULE-SET,gfw,Proxy
-  - RULE-SET,cncidr,DIRECT
-  - GEOIP,CN,DIRECT
+  - RULE-SET,direct,DIRECT
+  - RULE-SET,cncidr,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT,no-resolve
   - MATCH,Final
