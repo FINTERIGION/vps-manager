@@ -2,27 +2,7 @@
 # vpsm - FuturesView deployment, update, and password management
 
 fv_gen_password() {
-    local pass=""
-    # 256 bytes of urandom yield about 62 alphanumeric characters, so the
-    # 20-character target is always met. 64 bytes reached it only ~13% of the
-    # time and silently fell through to the weaker paths below.
-    if [[ -r /dev/urandom ]]; then
-        pass=$(head -c 256 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 20)
-    fi
-    if ((${#pass} < 16)) && command -v openssl >/dev/null 2>&1; then
-        pass=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 20)
-    fi
-    # Deliberately no timestamp/$RANDOM fallback: the panel login is reachable
-    # through the public /api/* proxy, so a guessable password would hand over
-    # the very site that is supposed to be the disguise. Returns non-zero rather
-    # than calling err(), because callers use a command substitution and an
-    # exit inside it would only kill the subshell, yielding an empty password.
-    if ((${#pass} < 16)); then
-        warn "Cannot generate a strong password: neither /dev/urandom nor openssl produced enough entropy"
-        return 1
-    fi
-    printf '%s\n' "$pass"
-    return 0
+    gen_panel_password
 }
 
 fv_apply_password() {
@@ -229,6 +209,14 @@ fv_deploy() {
     echo "=== Deploying FuturesView Web Panel ==="
     fv_check_prereqs
 
+    if declare -F nb_enabled >/dev/null && nb_enabled; then
+        msg "Disabling active Nanobot panel before enabling FuturesView (mutually exclusive)..."
+        if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
+            systemctl disable --now "$NB_SVC" 2>/dev/null || true
+        fi
+        db_write '.settings.nanobot.enabled = false'
+    fi
+
     mkdir -p "${FV_DIR%/*}"
     if [[ ! -d $FV_DIR/.git ]]; then
         msg "Cloning $FV_REPO into $FV_DIR ..."
@@ -271,6 +259,7 @@ fv_deploy() {
     msg "Deploying static assets to Caddy web root ($WWW_DIR) ..."
     mkdir -p "$WWW_DIR"
     if [[ -d $FV_DIR/web/static ]]; then
+        find "$WWW_DIR" -mindepth 1 -delete 2>/dev/null || rm -rf "${WWW_DIR:?}"/*
         cp -r "$FV_DIR/web/static/"* "$WWW_DIR/"
         find "$WWW_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
         find "$WWW_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
@@ -607,6 +596,9 @@ fv_remove() {
         systemctl disable --now "$FV_SVC" 2>/dev/null || true
     fi
     db_write '.settings.futures_view.enabled = false'
+    if ! declare -F nb_enabled >/dev/null || ! nb_enabled; then
+        find "$WWW_DIR" -mindepth 1 -delete 2>/dev/null || rm -rf "${WWW_DIR:?}"/*
+    fi
     caddy_gen
     caddy_reload
     ok "FuturesView disabled and removed from Caddy routing"

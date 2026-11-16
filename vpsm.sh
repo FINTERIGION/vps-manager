@@ -5,7 +5,7 @@ set -o pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 # shellcheck source=src/core.sh
 . "$(dirname "$SELF")/src/core.sh"
-for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view nanobot check; do
     # shellcheck disable=SC1090
     . "$SH_DIR/src/$_lib.sh"
 done
@@ -199,10 +199,12 @@ services_menu() {
         echo "2) Restart Xray"
         echo "3) Restart Caddy"
         echo "4) Restart FuturesView"
-        echo "5) Follow Xray log"
-        echo "6) Follow Caddy log"
-        echo "7) Follow FuturesView log"
-        echo "8) Show traffic sync log"
+        echo "5) Restart Nanobot"
+        echo "6) Follow Xray log"
+        echo "7) Follow Caddy log"
+        echo "8) Follow FuturesView log"
+        echo "9) Follow Nanobot log"
+        echo "10) Show traffic sync log"
         echo "0) Back"
         a=$(ask "Choose: ") || return 0
         case $a in
@@ -210,10 +212,12 @@ services_menu() {
             2) run_locked svc_restart xray ;;
             3) run_locked svc_restart caddy ;;
             4) run_locked svc_restart fv ;;
-            5) show_log xray ;;
-            6) show_log caddy ;;
-            7) show_log fv ;;
-            8) show_log sync ;;
+            5) run_locked svc_restart nb ;;
+            6) show_log xray ;;
+            7) show_log caddy ;;
+            8) show_log fv ;;
+            9) show_log nb ;;
+            10) show_log sync ;;
             0 | "") return 0 ;;
             *) continue ;;
         esac
@@ -284,7 +288,8 @@ menu() {
         "15) Enable BBR"
         "16) Sync traffic and status now"
         "17) Manage FuturesView panel"
-        "18) Uninstall vpsm"
+        "18) Manage Nanobot panel"
+        "19) Uninstall vpsm"
         " 0) Exit"
     )
     width=$(menu_width "${security[@]}" "${node[@]}" "${system[@]}")
@@ -317,7 +322,8 @@ menu() {
             15) enable_bbr ;;
             16) run_locked sync_all; ok "Traffic and status synchronized" ;;
             17) futures_view_menu; continue ;;
-            18) run_locked do_uninstall; [[ -f $DB ]] || exit 0 ;;
+            18) nanobot_menu; continue ;;
+            19) run_locked do_uninstall; [[ -f $DB ]] || exit 0 ;;
             0 | q | Q) exit 0 ;;
             *) continue ;;
         esac
@@ -404,6 +410,7 @@ main() {
         udp) run_locked set_udp "$@" ;;
         rules) edit_rules ;;
         fv | futures-view) run_locked fv_cmd "$@" ;;
+        nb | nanobot) run_locked nb_cmd "$@" ;;
         extra-refresh) extra_sub_async_refresh ;;
         regen) run_locked regen_all ;;
         sync) run_locked sync_all ;;

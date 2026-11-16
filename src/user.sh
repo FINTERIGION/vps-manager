@@ -277,7 +277,7 @@ set_reset_day() {
 
 set_port() {
     valid_port "${1:-}" || err "Usage: vpsm port <1-65535>"
-    valid_xray_port "$1" || err "Port $1 is used internally by vpsm (80 / $CADDY_PORT / $API_PORT / $FV_PORT), choose another"
+    valid_xray_port "$1" || err "Port $1 is used internally by vpsm (80 / $CADDY_PORT / $API_PORT / $FV_PORT / $NB_PORT / $NB_GW_PORT), choose another"
     if fw_ssh_ports | grep -qx "$1"; then
         err "Port $1 is the SSH port, choose another"
     fi
@@ -312,6 +312,10 @@ set_port() {
         err "Failed to update firewall for port $new, listen port not changed"
     fi
     caddy_reload || warn "Caddy reload failed after the port change; run: vpsm regen"
+    if declare -F nb_sync_config >/dev/null && [[ -f $NB_CONF ]] && [[ -n $(nb_get_password 2>/dev/null) ]]; then
+        nb_sync_config || warn "Failed to update $NB_CONF with new port"
+        nb_enabled && svc_active "$NB_SVC" && { svc restart "$NB_SVC" || warn "Failed to restart $NB_SVC"; }
+    fi
     ok "Listen port changed to $new; subscriptions and client nodes have been updated"
 }
 
@@ -345,6 +349,10 @@ set_domain() {
     fi
     install_units
     restart_changed_units
+    if declare -F nb_sync_config >/dev/null && [[ -f $NB_CONF ]] && [[ -n $(nb_get_password 2>/dev/null) ]]; then
+        nb_sync_config || warn "Failed to update $NB_CONF with new domain"
+        nb_enabled && svc_active "$NB_SVC" && { svc restart "$NB_SVC" || warn "Failed to restart $NB_SVC"; }
+    fi
     rm -f "$db_snap"
     ok "Domain changed to $1, Caddy will obtain a certificate for it automatically"
 }

@@ -1,0 +1,31 @@
+[Unit]
+Description=vpsm Nanobot (personal AI agent webui & gateway disguise)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=@ROOT@/nanobot
+Environment=HOME=@ROOT@/nanobot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@ROOT@/nanobot/.venv/bin/nanobot gateway --config @ROOT@/nanobot/config.json --workspace @ROOT@/nanobot/workspace --port @GW_PORT@
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+@NB_CPU_OPTS@
+
+[Install]
+WantedBy=multi-user.target

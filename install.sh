@@ -162,7 +162,7 @@ echo "$REPO $REF" >"$VPSM_ROOT/repo"
 chmod 600 "$VPSM_ROOT/repo"
 # shellcheck disable=SC1091
 . "$VPSM_ROOT/sh/src/core.sh"
-for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view nanobot check; do
     # shellcheck disable=SC1090
     . "$SH_DIR/src/$_lib.sh"
 done
@@ -187,7 +187,7 @@ if [[ -z $RESUME ]]; then
     valid_domain "$DOMAIN" || die "Invalid domain: $DOMAIN"
     ask PORT "Xray listen port" 443
     valid_port "$PORT" || die "Invalid port: $PORT"
-    valid_xray_port "$PORT" || die "Port $PORT is reserved internally (80 / $CADDY_PORT / $API_PORT / $FV_PORT)"
+    valid_xray_port "$PORT" || die "Port $PORT is reserved internally (80 / $CADDY_PORT / $API_PORT / $FV_PORT / $NB_PORT / $NB_GW_PORT)"
     ask NODE_NAME "Node name shown in clients" "$DOMAIN"
     if [[ $NODE_NAME != "$DOMAIN" ]]; then
         valid_node_name "$NODE_NAME" || die "Invalid node name"

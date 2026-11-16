@@ -222,6 +222,8 @@ node_check() {
     elif caddy_index_is_placeholder; then
         if fv_enabled; then
             ck_fail "Fallback content" "FuturesView is enabled but index.html is a generated placeholder (run: vpsm fv update)"
+        elif nb_enabled; then
+            ck_fail "Fallback content" "Nanobot is enabled but index.html is a generated placeholder (run: vpsm nb update)"
         else
             ck_warn "Fallback content" "index.html is a generated placeholder with no real content"
         fi
@@ -270,6 +272,16 @@ node_check() {
             ck_fail "service $FV_SVC" "$state, but /api/* is proxied to it, so the fallback returns 502"
         else
             ck_warn "service $FV_SVC" "$state (disabled, so the stale SPA has no live data)"
+        fi
+    fi
+    if nb_enabled || [[ -d $NB_DIR ]]; then
+        state=$(systemctl is-active "$NB_SVC" 2>/dev/null || echo inactive)
+        if svc_active "$NB_SVC"; then
+            ck_ok "service $NB_SVC" "active"
+        elif nb_enabled; then
+            ck_fail "service $NB_SVC" "$state, but /webui/* and /ws are proxied to it, so the fallback returns 502"
+        else
+            ck_warn "service $NB_SVC" "$state (disabled, so the stale SPA has no live backend)"
         fi
     fi
     if systemctl is-active --quiet vpsm-traffic.timer 2>/dev/null; then

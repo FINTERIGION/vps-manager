@@ -57,7 +57,7 @@ printf '# test fstab\n' >"$VPSM_FSTAB"
 
 # shellcheck disable=SC1091
 . "$PROJECT/src/core.sh"
-for lib in xray traffic extra_sub sub caddy user firewall security manage check; do
+for lib in xray traffic extra_sub sub caddy user firewall security manage futures_view nanobot check; do
     # shellcheck disable=SC1090
     . "$PROJECT/src/$lib.sh"
 done
@@ -551,7 +551,7 @@ else
 fi
 assert_eq "$old_key" "$(db_get '.settings.private_key')" "failed key rotation keeps the previous key"
 
-for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view nanobot check; do
     # shellcheck disable=SC1090
     . "$PROJECT/src/$_lib.sh"
 done
@@ -677,6 +677,105 @@ db_write '.settings.futures_view.enabled = false'
 caddy_gen
 assert_file_not_contains "$CADDYFILE" "handle /api/*" "disabling FuturesView removes API proxy from Caddyfile"
 
+# Nanobot functionality tests
+assert_eq "false" "$(nb_enabled && echo true || echo false)" "Nanobot is disabled by default"
+assert_file_not_contains "$CADDYFILE" "handle @nb_proxy" "Caddyfile has no Nanobot proxy by default"
+
+nb_test_pass=$(nb_gen_password)
+[[ ${#nb_test_pass} -ge 16 && ${#nb_test_pass} -le 32 ]] &&
+    ok_test "nb_gen_password produces valid high-strength password" || fail_test "nb_gen_password produces valid high-strength password"
+[[ $nb_test_pass =~ ^[A-Za-z0-9]+$ ]] &&
+    ok_test "nb_gen_password stays inside an unambiguous alphabet" ||
+    fail_test "nb_gen_password stays inside an unambiguous alphabet"
+
+assert_eq "wss://node.example.com/ws" "$(nb_public_ws_url)" "nb_public_ws_url omits port 443"
+db_write '.settings.port = 8444'
+assert_eq "wss://node.example.com:8444/ws" "$(nb_public_ws_url)" "nb_public_ws_url includes non-443 port"
+db_write '.settings.port = 443'
+
+db_write --arg p "$nb_test_pass" '.settings.nanobot.password = $p'
+nb_sync_config
+assert_eq "600" "$(stat -c %a "$NB_CONF")" "Nanobot config.json has 0600 permissions"
+assert_eq "true" "$(jq -r '.channels.websocket.websocketRequiresToken' "$NB_CONF")" "Nanobot enforces token authentication behind reverse proxy"
+assert_eq "$nb_test_pass" "$(jq -r '.channels.websocket.tokenIssueSecret' "$NB_CONF")" "Nanobot writes tokenIssueSecret to config.json"
+assert_eq "wss://node.example.com/ws" "$(jq -r '.channels.websocket.publicWsUrl' "$NB_CONF")" "Nanobot writes publicWsUrl to config.json"
+
+jq '.providers = {openai: {apiKey: "sk-user-custom"}}' "$NB_CONF" >"$NB_CONF.tmp" && mv "$NB_CONF.tmp" "$NB_CONF"
+nb_set_password_cmd "CustomSecretPass123" >/dev/null 2>&1
+assert_eq "CustomSecretPass123" "$(nb_get_password)" "nb_set_password_cmd updates password in database"
+assert_eq "CustomSecretPass123" "$(jq -r '.channels.websocket.tokenIssueSecret' "$NB_CONF")" "nb_set_password_cmd updates tokenIssueSecret in config.json"
+assert_eq "sk-user-custom" "$(jq -r '.providers.openai.apiKey' "$NB_CONF")" "nb_sync_config preserves user-configured providers"
+
+# Stub a Nanobot wheel layout inside NB_DIR/.venv to verify static sync and mutual exclusion
+mkdir -p "$NB_DIR/.venv/bin" "$TMP/fake-nanobot-pkg/nanobot/web/dist/assets"
+printf '<!doctype html><html><body><div id="app">Nanobot</div></body></html>\n' >"$TMP/fake-nanobot-pkg/nanobot/web/dist/index.html"
+printf 'console.log("nanobot");\n' >"$TMP/fake-nanobot-pkg/nanobot/web/dist/assets/app.js"
+cat >"$NB_DIR/.venv/bin/python" <<EOF
+#!/usr/bin/env bash
+if [[ \$* == *"importlib.metadata"* ]]; then
+    echo "0.4.9"
+elif [[ \$* == *"web/dist"* ]]; then
+    echo "$TMP/fake-nanobot-pkg/nanobot/web/dist"
+else
+    echo "Python 3.12.0"
+fi
+EOF
+cat >"$NB_DIR/.venv/bin/pip" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$NB_DIR/.venv/bin/nanobot" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 755 "$NB_DIR/.venv/bin/python" "$NB_DIR/.venv/bin/pip" "$NB_DIR/.venv/bin/nanobot"
+
+printf 'old-fv-file\n' >"$WWW_DIR/stale-fv.txt"
+db_write '.settings.futures_view.enabled = true'
+nb_deploy >/dev/null 2>&1
+assert_eq "true" "$(nb_enabled && echo true || echo false)" "nb_deploy enables Nanobot"
+assert_eq "false" "$(fv_enabled && echo true || echo false)" "nb_deploy disables mutually exclusive FuturesView"
+[[ ! -e $WWW_DIR/stale-fv.txt && -f $WWW_DIR/assets/app.js ]] &&
+    ok_test "nb_deploy replaces old panel files with Nanobot web/dist assets" ||
+    fail_test "nb_deploy replaces old panel files with Nanobot web/dist assets"
+assert_file_contains "$CADDYFILE" "handle @nb_proxy" "Caddyfile includes Nanobot proxy routes when enabled"
+assert_file_contains "$CADDYFILE" "handle @nb_ws" "Caddyfile includes WebSocket upgrade proxy when Nanobot enabled"
+assert_file_contains "$CADDYFILE" "reverse_proxy 127.0.0.1:8765" "Caddyfile proxies Nanobot traffic to NB_PORT"
+
+nb_status_out=$(nb_status)
+[[ $nb_status_out == *"Nanobot Panel Status"* && $nb_status_out == *"127.0.0.1:8765"* && $nb_status_out == *"wss://node.example.com/ws"* ]] &&
+    ok_test "nb_status displays status, port and WSS URL" || fail_test "nb_status displays status, port and WSS URL"
+
+assert_eq 60 "$(nb_cpu_limit)" "Nanobot CPU limit defaults to 60%"
+nb_rendered=$(nb_render_unit)
+[[ $nb_rendered == *"CPUQuota=60%"* && $nb_rendered == *"Nice=15"* && $nb_rendered == *"--port 18790"* ]] &&
+    ok_test "Nanobot unit renders default CPUQuota, Nice and gateway port" ||
+    fail_test "Nanobot unit renders default CPUQuota, Nice and gateway port"
+nb_set_cpu_limit_cmd 75 >/dev/null 2>&1
+assert_eq 75 "$(nb_cpu_limit)" "nb_set_cpu_limit_cmd updates CPU limit to 75%"
+nb_rendered=$(nb_render_unit)
+[[ $nb_rendered == *"CPUQuota=75%"* ]] &&
+    ok_test "Nanobot unit renders updated 75% CPUQuota" || fail_test "Nanobot unit renders updated 75% CPUQuota"
+nb_set_cpu_limit_cmd off >/dev/null 2>&1
+assert_eq 0 "$(nb_cpu_limit)" "nb_set_cpu_limit_cmd off disables CPU limit"
+nb_rendered=$(nb_render_unit)
+[[ $nb_rendered != *"CPUQuota="* && $nb_rendered != *"@NB_CPU_OPTS@"* && $nb_rendered != *"@ROOT@"* && $nb_rendered != *"@GW_PORT@"* ]] &&
+    ok_test "disabled Nanobot CPU limit removes CPUQuota and leaves no placeholders" ||
+    fail_test "disabled Nanobot CPU limit removes CPUQuota and leaves no placeholders"
+nb_set_cpu_limit_cmd 60 >/dev/null 2>&1
+
+printf '%s\n' "$CADDY_OLD_INDEX" >"$WWW_DIR/index.html"
+nb_stale_warn=$(caddy_gen 2>&1 >/dev/null)
+[[ $nb_stale_warn == *"Nanobot is enabled"* && $nb_stale_warn == *"placeholder"* ]] &&
+    ok_test "an enabled Nanobot behind a placeholder fallback warns at deploy time" ||
+    fail_test "an enabled Nanobot behind a placeholder fallback warns at deploy time"
+
+printf 'n\n' | nb_remove >/dev/null 2>&1
+assert_eq "false" "$(nb_enabled && echo true || echo false)" "nb_remove disables Nanobot"
+assert_file_not_contains "$CADDYFILE" "handle @nb_proxy" "disabling Nanobot removes proxy routes from Caddyfile"
+assert_file_not_contains "$CADDYFILE" "127.0.0.1:8765" "disabling Nanobot removes NB_PORT from Caddyfile"
+rm -rf "$NB_DIR"
+
 # Disguise health check: read-only, and it must never abort its caller
 if cert_out=$(cert_summary); then
     ok_test "cert_summary never fails, whatever the probe finds"
@@ -705,7 +804,8 @@ help_output=$(bash "$PROJECT/vpsm.sh" help)
 [[ $help_output == *"single-node multi-user"* ]] && ok_test "English CLI help is available" || fail_test "English CLI help is available"
 menu_output=$(printf '0\n' | bash "$PROJECT/vpsm.sh" 2>/dev/null)
 if [[ $menu_output == *"1) Change SSH port"* && $menu_output == *"11) Check disguise health"* &&
-    $menu_output == *"17) Manage FuturesView panel"* && $menu_output == *"18) Uninstall vpsm"* ]]; then
+    $menu_output == *"17) Manage FuturesView panel"* && $menu_output == *"18) Manage Nanobot panel"* &&
+    $menu_output == *"19) Uninstall vpsm"* ]]; then
     ok_test "interactive CLI renders the complete numeric panel"
 else
     fail_test "interactive CLI renders the complete numeric panel"
