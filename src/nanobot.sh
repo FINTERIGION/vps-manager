@@ -48,14 +48,17 @@ nb_sync_config() {
     gw_port=$(nb_gw_port)
     ws_url=$(nb_public_ws_url) || { warn "Domain is not configured; cannot determine publicWsUrl"; return 1; }
 
-    mkdir -p "$NB_DIR" "$NB_WORKSPACE"
-    chmod 700 "$NB_DIR"
+    mkdir -p "$NB_DIR" "$NB_WORKSPACE" "$NB_DIR/.nanobot"
+    chmod 700 "$NB_DIR" "$NB_DIR/.nanobot"
 
     tmp=$(umask 077; mktemp "$NB_DIR/.config.XXXXXX") || return 1
     if [[ -s $NB_CONF ]] && jq -e 'type == "object"' "$NB_CONF" >/dev/null 2>&1; then
         if ! jq --argjson gw_port "$gw_port" --argjson ws_port "$port" \
-            --arg ws_url "$ws_url" --arg secret "$pass" '
+            --arg ws_url "$ws_url" --arg secret "$pass" --arg ws_dir "$NB_WORKSPACE" '
             .gateway = ((.gateway // {}) + {host: "127.0.0.1", port: $gw_port})
+            | .agents = (.agents // {})
+            | .agents.defaults = (.agents.defaults // {})
+            | .agents.defaults.workspace = (.agents.defaults.workspace // $ws_dir)
             | .channels = (.channels // {})
             | .channels.websocket = ((.channels.websocket // {}) + {
                 enabled: true,
@@ -63,7 +66,7 @@ nb_sync_config() {
                 port: $ws_port,
                 path: "/ws",
                 publicWsUrl: $ws_url,
-                tokenIssuePath: "/webui/bootstrap",
+                tokenIssuePath: "",
                 tokenIssueSecret: $secret,
                 websocketRequiresToken: true
               })' "$NB_CONF" >"$tmp"; then
@@ -72,7 +75,12 @@ nb_sync_config() {
         fi
     else
         if ! jq -n --argjson gw_port "$gw_port" --argjson ws_port "$port" \
-            --arg ws_url "$ws_url" --arg secret "$pass" '{
+            --arg ws_url "$ws_url" --arg secret "$pass" --arg ws_dir "$NB_WORKSPACE" '{
+                agents: {
+                    defaults: {
+                        workspace: $ws_dir
+                    }
+                },
                 gateway: {
                     host: "127.0.0.1",
                     port: $gw_port
@@ -84,7 +92,7 @@ nb_sync_config() {
                         port: $ws_port,
                         path: "/ws",
                         publicWsUrl: $ws_url,
-                        tokenIssuePath: "/webui/bootstrap",
+                        tokenIssuePath: "",
                         tokenIssueSecret: $secret,
                         websocketRequiresToken: true
                     }
@@ -96,6 +104,8 @@ nb_sync_config() {
     fi
     chmod 600 "$tmp"
     mv -f "$tmp" "$NB_CONF"
+    ln -sfn ../config.json "$NB_DIR/.nanobot/config.json"
+    ln -sfn ../workspace "$NB_DIR/.nanobot/workspace"
 }
 
 nb_render_unit() {
@@ -142,7 +152,7 @@ nb_check_prereqs() {
 }
 
 nb_github_wheel_url() {
-    local tag=${1:-} api_url json
+    local tag=${1:-} api_url json arch url
     if [[ -n $tag ]]; then
         tag="v${tag#[Vv]}"
         api_url="https://api.github.com/repos/$NB_REPO/releases/tags/$tag"
@@ -151,7 +161,14 @@ nb_github_wheel_url() {
     fi
     json=$(curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 30 "$api_url" 2>/dev/null || true)
     [[ -n $json ]] || return 1
-    jq -r '.assets[]? | select(.name | endswith(".whl")) | .browser_download_url' <<<"$json" | head -n 1
+    arch=$(uname -m)
+    url=$(jq -r --arg arch "$arch" '
+        [.assets[]? | select(.name | endswith(".whl"))] as $whls
+        | (($whls[] | select(.name | contains("none-any.whl"))),
+           ($whls[] | select(.name | contains($arch))),
+           $whls[0]) // empty
+        | .browser_download_url' <<<"$json" | head -n 1)
+    [[ -n $url ]] && printf '%s\n' "$url"
 }
 
 nb_install_pkg() {
@@ -233,7 +250,11 @@ nb_status() {
     ws_url=$(nb_public_ws_url 2>/dev/null || echo "-")
     echo "=== Nanobot Panel Status ==="
     echo "Enabled:       $(nb_enabled && echo "yes" || echo "no")"
-    echo "Package:       $NB_PKG ${ver:+(v$ver)}${ver:-"(not installed)"}"
+    if [[ -n $ver ]]; then
+        echo "Package:       $NB_PKG (v$ver)"
+    else
+        echo "Package:       $NB_PKG (not installed)"
+    fi
     echo "Virtualenv:    $([[ -x $NB_DIR/.venv/bin/python ]] && echo "installed ($("$NB_DIR/.venv/bin/python" --version 2>/dev/null))" || echo "missing")"
     echo "Config file:   $NB_CONF $([[ -f $NB_CONF ]] && echo "(present)" || echo "(missing)")"
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
@@ -273,6 +294,19 @@ nb_deploy() {
     echo "=== Deploying Nanobot Web Panel (HKUDS/nanobot) ==="
     nb_check_prereqs
 
+    port=$(nb_port)
+    if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
+        if port_in_use "$port" && ! svc_active "$NB_SVC"; then
+            err "Port $port is already in use by another process"
+        fi
+        if port_in_use "$(nb_gw_port)" && ! svc_active "$NB_SVC"; then
+            err "Gateway port $(nb_gw_port) is already in use by another process"
+        fi
+    fi
+
+    nb_install_pkg "$ver"
+    nb_locate_dist >/dev/null || err "Bundled Nanobot WebUI dist directory not found in $NB_DIR/.venv"
+
     if declare -F fv_enabled >/dev/null && fv_enabled; then
         msg "Disabling active FuturesView panel before enabling Nanobot (mutually exclusive)..."
         if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
@@ -280,8 +314,6 @@ nb_deploy() {
         fi
         db_write '.settings.futures_view.enabled = false'
     fi
-
-    nb_install_pkg "$ver"
 
     pass=$(nb_get_password)
     if ((${#pass} < 16)); then
@@ -299,6 +331,7 @@ nb_deploy() {
         systemctl daemon-reload
         systemctl enable "$NB_SVC"
         systemctl restart "$NB_SVC"
+        svc_settled "$NB_SVC" || warn "$NB_SVC failed to stay up after start, check: journalctl -u $NB_SVC -n 50"
     fi
 
     caddy_gen
@@ -358,6 +391,7 @@ nb_update() {
     if [[ -z ${VPSM_NO_SERVICE:-} ]] && nb_enabled; then
         msg "Restarting $NB_SVC service ..."
         systemctl restart "$NB_SVC" || warn "Failed to restart $NB_SVC"
+        svc_settled "$NB_SVC" || warn "$NB_SVC failed to stay up after update, check: journalctl -u $NB_SVC -n 50"
     fi
 
     caddy_gen

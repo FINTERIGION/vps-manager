@@ -697,8 +697,13 @@ db_write --arg p "$nb_test_pass" '.settings.nanobot.password = $p'
 nb_sync_config
 assert_eq "600" "$(stat -c %a "$NB_CONF")" "Nanobot config.json has 0600 permissions"
 assert_eq "true" "$(jq -r '.channels.websocket.websocketRequiresToken' "$NB_CONF")" "Nanobot enforces token authentication behind reverse proxy"
+assert_eq "" "$(jq -r '.channels.websocket.tokenIssuePath' "$NB_CONF")" "Nanobot keeps tokenIssuePath empty so /webui/bootstrap is not shadowed"
 assert_eq "$nb_test_pass" "$(jq -r '.channels.websocket.tokenIssueSecret' "$NB_CONF")" "Nanobot writes tokenIssueSecret to config.json"
 assert_eq "wss://node.example.com/ws" "$(jq -r '.channels.websocket.publicWsUrl' "$NB_CONF")" "Nanobot writes publicWsUrl to config.json"
+assert_eq "$NB_WORKSPACE" "$(jq -r '.agents.defaults.workspace' "$NB_CONF")" "Nanobot writes agents.defaults.workspace to config.json"
+[[ -L $NB_DIR/.nanobot/config.json ]] &&
+    ok_test "Nanobot symlinks ~/.nanobot/config.json to managed config" ||
+    fail_test "Nanobot symlinks ~/.nanobot/config.json to managed config"
 
 jq '.providers = {openai: {apiKey: "sk-user-custom"}}' "$NB_CONF" >"$NB_CONF.tmp" && mv "$NB_CONF.tmp" "$NB_CONF"
 nb_set_password_cmd "CustomSecretPass123" >/dev/null 2>&1
@@ -743,8 +748,8 @@ assert_file_contains "$CADDYFILE" "handle @nb_ws" "Caddyfile includes WebSocket 
 assert_file_contains "$CADDYFILE" "reverse_proxy 127.0.0.1:8765" "Caddyfile proxies Nanobot traffic to NB_PORT"
 
 nb_status_out=$(nb_status)
-[[ $nb_status_out == *"Nanobot Panel Status"* && $nb_status_out == *"127.0.0.1:8765"* && $nb_status_out == *"wss://node.example.com/ws"* ]] &&
-    ok_test "nb_status displays status, port and WSS URL" || fail_test "nb_status displays status, port and WSS URL"
+[[ $nb_status_out == *"Nanobot Panel Status"* && $nb_status_out == *"Package:       nanobot-ai (v0.4.9)"* && $nb_status_out == *"127.0.0.1:8765"* && $nb_status_out == *"wss://node.example.com/ws"* ]] &&
+    ok_test "nb_status displays status, version, port and WSS URL" || fail_test "nb_status displays status, version, port and WSS URL"
 
 assert_eq 60 "$(nb_cpu_limit)" "Nanobot CPU limit defaults to 60%"
 nb_rendered=$(nb_render_unit)

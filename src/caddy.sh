@@ -165,7 +165,7 @@ caddy_gen() {
 			header_up X-Forwarded-Proto https
 		}
 	}
-	@nb_proxy path /webui/* /api/* /auth/* /ws /ws/* /issue-token /oauth/* /health
+	@nb_proxy path /webui /webui/* /api /api/* /auth /auth/* /ws /ws/* /issue-token /oauth /oauth/* /health
 	handle @nb_proxy {
 		reverse_proxy 127.0.0.1:$nb_p {
 			header_up X-Real-IP {remote_host}

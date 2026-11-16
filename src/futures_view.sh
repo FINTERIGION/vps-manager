@@ -209,14 +209,6 @@ fv_deploy() {
     echo "=== Deploying FuturesView Web Panel ==="
     fv_check_prereqs
 
-    if declare -F nb_enabled >/dev/null && nb_enabled; then
-        msg "Disabling active Nanobot panel before enabling FuturesView (mutually exclusive)..."
-        if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
-            systemctl disable --now "$NB_SVC" 2>/dev/null || true
-        fi
-        db_write '.settings.nanobot.enabled = false'
-    fi
-
     mkdir -p "${FV_DIR%/*}"
     if [[ ! -d $FV_DIR/.git ]]; then
         msg "Cloning $FV_REPO into $FV_DIR ..."
@@ -254,6 +246,14 @@ fv_deploy() {
         ) || return 1
     else
         err "Directory $FV_DIR/webui not found"
+    fi
+
+    if declare -F nb_enabled >/dev/null && nb_enabled; then
+        msg "Disabling active Nanobot panel before enabling FuturesView (mutually exclusive)..."
+        if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
+            systemctl disable --now "$NB_SVC" 2>/dev/null || true
+        fi
+        db_write '.settings.nanobot.enabled = false'
     fi
 
     msg "Deploying static assets to Caddy web root ($WWW_DIR) ..."
