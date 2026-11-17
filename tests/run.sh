@@ -4,6 +4,10 @@
 set -o pipefail
 
 PROJECT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if ! command -v jq >/dev/null 2>&1 && [[ -x "$PROJECT/tests/.jq-root/usr/bin/jq" ]]; then
+    export PATH="$PROJECT/tests/.jq-root/usr/bin:$PATH"
+    export LD_LIBRARY_PATH="$PROJECT/tests/.jq-root/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 for dependency in jq python3; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "Missing test dependency: $dependency. Run install.sh or install jq and Python 3 first." >&2
@@ -264,7 +268,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ ${CURL_STUB_FAIL:-0} == 1 ]] && exit 22
-cp "$FIXTURE" "$out"
+[[ -n $out && $out != /dev/null ]] && cp "$FIXTURE" "$out"
+exit 0
 EOF
 chmod 755 "$TMP/stubs/curl"
 export PATH="$TMP/stubs:$PATH"
@@ -969,8 +974,7 @@ fw_allowed | cut -f1 >"$FW_STAMP"
 db_write '.settings.firewall.enabled = true'
 (
     unset VPSM_NO_SERVICE
-    PATH="$TMP/fw-bin:$PATH"
-    fw_ports_ensure >/dev/null 2>&1
+    PATH="$TMP/fw-bin:$PATH" fw_ports_ensure >/dev/null 2>&1
 )
 db_write '.settings.firewall.enabled = false'
 assert_file_contains "$FW_STUB_LOG" "-D DOCKER-USER -j VPSM-IN" "fw_ports_ensure migrates away from legacy DOCKER-USER VPSM-IN hook"
@@ -999,8 +1003,7 @@ chmod 755 "$TMP/race-bin/curl"
 rm -f "$EXTRA_REFRESH_STAMP" "$EXTRA_ATTEMPT_STAMP" "$SUB_EXTRA/racetest".*
 db_write '.settings.extra_subs = [{alias:"racetest",url:"https://subscriptions.example/clash.yaml",filter:"^Tokyo$"}]'
 (
-    PATH="$TMP/race-bin:$PATH"
-    extra_sub_async_refresh force >/dev/null 2>&1
+    PATH="$TMP/race-bin:$PATH" extra_sub_async_refresh force >/dev/null 2>&1
 )
 [[ ! -e $SUB_EXTRA/racetest.proxies.yaml ]] &&
     ok_test "async refresh discards stale cache when filter changes mid-flight" ||
@@ -1031,6 +1034,7 @@ chmod 755 "$TMP/upd-pkg/vpsm-new/vpsm.sh"
 tar -czf "$TMP/upd.tgz" -C "$TMP/upd-pkg" vpsm-new
 if (
     export VPSM_ROOT="$TMP/upd-root"
+    # shellcheck disable=SC1091
     . "$TMP/upd-root/sh/src/core.sh"
     for _l in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
         # shellcheck disable=SC1090
@@ -1096,8 +1100,7 @@ export FV_PY_STDIN="$TMP/fv-py-stdin.txt"
 : >"$FV_PY_STDIN"
 (
     unset VPSM_NO_SERVICE
-    PATH="$TMP/fv-bin:$PATH"
-    fv_apply_password "SuperSecretPass99"
+    PATH="$TMP/fv-bin:$PATH" fv_apply_password "SuperSecretPass99"
 ) >/dev/null 2>&1
 assert_file_contains "$FV_RUNUSER_LOG" "-u vpsm-fv -- env -i" "fv_apply_password runs Python unprivileged via runuser"
 assert_file_not_contains "$FV_RUNUSER_LOG" "SuperSecretPass99" "fv_apply_password never passes password in command arguments"
