@@ -17,6 +17,7 @@ from src.extra_sub import (  # noqa: E402
     check_url,
     compile_filter,
     normalize,
+    resolve_redirect,
     write_normalized,
 )
 
@@ -160,6 +161,25 @@ class ExternalSubscriptionTests(unittest.TestCase):
         )
         with self.assertRaises(SubscriptionError):
             normalize(bad_yaml)
+
+    def test_redirect_to_forbidden_url_is_rejected(self):
+        for target in (
+            "http://127.0.0.1:10085/api",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://localhost:8888/api/status",
+            "//127.0.0.1:8443/sub",
+        ):
+            with self.subTest(target=target):
+                with self.assertRaises(SubscriptionError):
+                    resolve_redirect("https://example.com/sub.yaml", target)
+
+    def test_6to4_forbidden_ip_is_rejected(self):
+        with self.assertRaises(SubscriptionError):
+            check_url("http://[2002:7f00:1::]/sub")
+
+    def test_unresolved_host_fails_in_strict_mode(self):
+        with self.assertRaises(SubscriptionError):
+            check_url("https://nonexistent.invalid/sub.yaml", allow_unresolved=False)
 
 
 if __name__ == "__main__":

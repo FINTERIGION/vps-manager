@@ -277,7 +277,7 @@ set_reset_day() {
 
 set_port() {
     valid_port "${1:-}" || err "Usage: vpsm port <1-65535>"
-    valid_xray_port "$1" || err "Port $1 is used internally by vpsm (80 / $CADDY_PORT / $API_PORT / $FV_PORT / $NB_PORT / $NB_GW_PORT), choose another"
+    valid_xray_port "$1" || err "Port $1 is used internally by vpsm (80 / $CADDY_PORT / $API_PORT / $FV_PORT), choose another"
     if fw_ssh_ports | grep -qx "$1"; then
         err "Port $1 is the SSH port, choose another"
     fi
@@ -312,10 +312,8 @@ set_port() {
         err "Failed to update firewall for port $new, listen port not changed"
     fi
     caddy_reload || warn "Caddy reload failed after the port change; run: vpsm regen"
-    if declare -F nb_sync_config >/dev/null && [[ -f $NB_CONF ]] && [[ -n $(nb_get_password 2>/dev/null) ]]; then
-        nb_sync_config || warn "Failed to update $NB_CONF with new port"
-        nb_enabled && svc_active "$NB_SVC" && { svc restart "$NB_SVC" || warn "Failed to restart $NB_SVC"; }
-    fi
+    install_units
+    restart_changed_units
     ok "Listen port changed to $new; subscriptions and client nodes have been updated"
 }
 
@@ -349,10 +347,6 @@ set_domain() {
     fi
     install_units
     restart_changed_units
-    if declare -F nb_sync_config >/dev/null && [[ -f $NB_CONF ]] && [[ -n $(nb_get_password 2>/dev/null) ]]; then
-        nb_sync_config || warn "Failed to update $NB_CONF with new domain"
-        nb_enabled && svc_active "$NB_SVC" && { svc restart "$NB_SVC" || warn "Failed to restart $NB_SVC"; }
-    fi
     rm -f "$db_snap"
     ok "Domain changed to $1, Caddy will obtain a certificate for it automatically"
 }
@@ -494,24 +488,16 @@ regen_all() {
     ok "Configs regenerated"
 }
 
-edit_rules() {
-    local bak="" had_rules=""
+apply_custom_rules() {
+    local staged=$1 bak="" had_rules=""
     if [[ -f $CUSTOM_RULES ]]; then
         had_rules=1
         bak=$(mktemp "$ROOT/.rules.bak.XXXXXX") || err "Failed to back up custom rules"
         cp -p "$CUSTOM_RULES" "$bak" || { rm -f "$bak"; err "Failed to back up custom rules"; }
-    else
-        cat >"$CUSTOM_RULES" <<'EOF'
-# Custom Clash rules, one per line, inserted before all built-in rules (highest priority)
-# Available policy groups: Proxy / Steam / WebRTC / Final / DIRECT / REJECT
-# Examples:
-# DOMAIN-SUFFIX,example.com,Proxy
-# DOMAIN-SUFFIX,steampowered.com,Steam
-# IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
-EOF
     fi
-    "${EDITOR:-vi}" "$CUSTOM_RULES"
-    if ! run_locked sub_regen force; then
+    cp -f "$staged" "$CUSTOM_RULES" || { rm -f "$bak"; err "Failed to write custom rules"; }
+    chmod 644 "$CUSTOM_RULES" 2>/dev/null || true
+    if ! sub_regen force; then
         if [[ -n $had_rules ]]; then
             mv -f "$bak" "$CUSTOM_RULES"
         else
@@ -520,5 +506,36 @@ EOF
         err "Custom rules produced invalid subscription YAML; reverted to previous rules"
     fi
     rm -f "$bak"
+}
+
+edit_rules() {
+    local tmp
+    tmp=$(mktemp "$ROOT/.rules.edit.XXXXXX") || err "Failed to create temporary rules file"
+    if [[ -f $CUSTOM_RULES ]]; then
+        cp -p "$CUSTOM_RULES" "$tmp" || { rm -f "$tmp"; err "Failed to copy custom rules"; }
+    else
+        cat >"$tmp" <<'EOF'
+# Custom Clash rules, one per line, inserted before all built-in rules (highest priority)
+# Available policy groups: Proxy / Steam / WebRTC / Final / DIRECT / REJECT
+# Examples:
+# DOMAIN-SUFFIX,example.com,Proxy
+# DOMAIN-SUFFIX,steampowered.com,Steam
+# IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+EOF
+    fi
+    if ! "${EDITOR:-vi}" "$tmp"; then
+        rm -f "$tmp"
+        err "Editor exited with an error; custom rules were not changed"
+    fi
+    if [[ -f $CUSTOM_RULES ]] && cmp -s "$tmp" "$CUSTOM_RULES"; then
+        rm -f "$tmp"
+        msg "Custom rules unchanged"
+        return 0
+    fi
+    if ! run_locked apply_custom_rules "$tmp"; then
+        rm -f "$tmp"
+        exit 1
+    fi
+    rm -f "$tmp"
     ok "Subscriptions updated, takes effect after clients refresh"
 }

@@ -57,7 +57,7 @@ printf '# test fstab\n' >"$VPSM_FSTAB"
 
 # shellcheck disable=SC1091
 . "$PROJECT/src/core.sh"
-for lib in xray traffic extra_sub sub caddy user firewall security manage futures_view nanobot check; do
+for lib in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
     # shellcheck disable=SC1090
     . "$PROJECT/src/$lib.sh"
 done
@@ -551,7 +551,7 @@ else
 fi
 assert_eq "$old_key" "$(db_get '.settings.private_key')" "failed key rotation keeps the previous key"
 
-for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view nanobot check; do
+for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
     # shellcheck disable=SC1090
     . "$PROJECT/src/$_lib.sh"
 done
@@ -677,110 +677,6 @@ db_write '.settings.futures_view.enabled = false'
 caddy_gen
 assert_file_not_contains "$CADDYFILE" "handle /api/*" "disabling FuturesView removes API proxy from Caddyfile"
 
-# Nanobot functionality tests
-assert_eq "false" "$(nb_enabled && echo true || echo false)" "Nanobot is disabled by default"
-assert_file_not_contains "$CADDYFILE" "handle @nb_proxy" "Caddyfile has no Nanobot proxy by default"
-
-nb_test_pass=$(nb_gen_password)
-[[ ${#nb_test_pass} -ge 16 && ${#nb_test_pass} -le 32 ]] &&
-    ok_test "nb_gen_password produces valid high-strength password" || fail_test "nb_gen_password produces valid high-strength password"
-[[ $nb_test_pass =~ ^[A-Za-z0-9]+$ ]] &&
-    ok_test "nb_gen_password stays inside an unambiguous alphabet" ||
-    fail_test "nb_gen_password stays inside an unambiguous alphabet"
-
-assert_eq "wss://node.example.com/ws" "$(nb_public_ws_url)" "nb_public_ws_url omits port 443"
-db_write '.settings.port = 8444'
-assert_eq "wss://node.example.com:8444/ws" "$(nb_public_ws_url)" "nb_public_ws_url includes non-443 port"
-db_write '.settings.port = 443'
-
-db_write --arg p "$nb_test_pass" '.settings.nanobot.password = $p'
-nb_sync_config
-assert_eq "600" "$(stat -c %a "$NB_CONF")" "Nanobot config.json has 0600 permissions"
-assert_eq "true" "$(jq -r '.channels.websocket.websocketRequiresToken' "$NB_CONF")" "Nanobot enforces token authentication behind reverse proxy"
-assert_eq "" "$(jq -r '.channels.websocket.tokenIssuePath' "$NB_CONF")" "Nanobot keeps tokenIssuePath empty so /webui/bootstrap is not shadowed"
-assert_eq "$nb_test_pass" "$(jq -r '.channels.websocket.tokenIssueSecret' "$NB_CONF")" "Nanobot writes tokenIssueSecret to config.json"
-assert_eq "wss://node.example.com/ws" "$(jq -r '.channels.websocket.publicWsUrl' "$NB_CONF")" "Nanobot writes publicWsUrl to config.json"
-assert_eq "$NB_WORKSPACE" "$(jq -r '.agents.defaults.workspace' "$NB_CONF")" "Nanobot writes agents.defaults.workspace to config.json"
-[[ -L $NB_DIR/.nanobot/config.json ]] &&
-    ok_test "Nanobot symlinks ~/.nanobot/config.json to managed config" ||
-    fail_test "Nanobot symlinks ~/.nanobot/config.json to managed config"
-
-jq '.providers = {openai: {apiKey: "sk-user-custom"}}' "$NB_CONF" >"$NB_CONF.tmp" && mv "$NB_CONF.tmp" "$NB_CONF"
-nb_set_password_cmd "CustomSecretPass123" >/dev/null 2>&1
-assert_eq "CustomSecretPass123" "$(nb_get_password)" "nb_set_password_cmd updates password in database"
-assert_eq "CustomSecretPass123" "$(jq -r '.channels.websocket.tokenIssueSecret' "$NB_CONF")" "nb_set_password_cmd updates tokenIssueSecret in config.json"
-assert_eq "sk-user-custom" "$(jq -r '.providers.openai.apiKey' "$NB_CONF")" "nb_sync_config preserves user-configured providers"
-
-# Stub a Nanobot wheel layout inside NB_DIR/.venv to verify static sync and mutual exclusion
-mkdir -p "$NB_DIR/.venv/bin" "$TMP/fake-nanobot-pkg/nanobot/web/dist/assets"
-printf '<!doctype html><html><body><div id="app">Nanobot</div></body></html>\n' >"$TMP/fake-nanobot-pkg/nanobot/web/dist/index.html"
-printf 'console.log("nanobot");\n' >"$TMP/fake-nanobot-pkg/nanobot/web/dist/assets/app.js"
-cat >"$NB_DIR/.venv/bin/python" <<EOF
-#!/usr/bin/env bash
-if [[ \$* == *"importlib.metadata"* ]]; then
-    echo "0.4.9"
-elif [[ \$* == *"web/dist"* ]]; then
-    echo "$TMP/fake-nanobot-pkg/nanobot/web/dist"
-else
-    echo "Python 3.12.0"
-fi
-EOF
-cat >"$NB_DIR/.venv/bin/pip" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-cat >"$NB_DIR/.venv/bin/nanobot" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-chmod 755 "$NB_DIR/.venv/bin/python" "$NB_DIR/.venv/bin/pip" "$NB_DIR/.venv/bin/nanobot"
-
-printf 'old-fv-file\n' >"$WWW_DIR/stale-fv.txt"
-db_write '.settings.futures_view.enabled = true'
-nb_deploy >/dev/null 2>&1
-assert_eq "true" "$(nb_enabled && echo true || echo false)" "nb_deploy enables Nanobot"
-assert_eq "false" "$(fv_enabled && echo true || echo false)" "nb_deploy disables mutually exclusive FuturesView"
-[[ ! -e $WWW_DIR/stale-fv.txt && -f $WWW_DIR/assets/app.js ]] &&
-    ok_test "nb_deploy replaces old panel files with Nanobot web/dist assets" ||
-    fail_test "nb_deploy replaces old panel files with Nanobot web/dist assets"
-assert_file_contains "$CADDYFILE" "handle @nb_proxy" "Caddyfile includes Nanobot proxy routes when enabled"
-assert_file_contains "$CADDYFILE" "handle @nb_ws" "Caddyfile includes WebSocket upgrade proxy when Nanobot enabled"
-assert_file_contains "$CADDYFILE" "reverse_proxy 127.0.0.1:8765" "Caddyfile proxies Nanobot traffic to NB_PORT"
-
-nb_status_out=$(nb_status)
-[[ $nb_status_out == *"Nanobot Panel Status"* && $nb_status_out == *"Package:       nanobot-ai (v0.4.9)"* && $nb_status_out == *"127.0.0.1:8765"* && $nb_status_out == *"wss://node.example.com/ws"* ]] &&
-    ok_test "nb_status displays status, version, port and WSS URL" || fail_test "nb_status displays status, version, port and WSS URL"
-
-assert_eq 60 "$(nb_cpu_limit)" "Nanobot CPU limit defaults to 60%"
-nb_rendered=$(nb_render_unit)
-[[ $nb_rendered == *"CPUQuota=60%"* && $nb_rendered == *"Nice=15"* && $nb_rendered == *"--port 18790"* ]] &&
-    ok_test "Nanobot unit renders default CPUQuota, Nice and gateway port" ||
-    fail_test "Nanobot unit renders default CPUQuota, Nice and gateway port"
-nb_set_cpu_limit_cmd 75 >/dev/null 2>&1
-assert_eq 75 "$(nb_cpu_limit)" "nb_set_cpu_limit_cmd updates CPU limit to 75%"
-nb_rendered=$(nb_render_unit)
-[[ $nb_rendered == *"CPUQuota=75%"* ]] &&
-    ok_test "Nanobot unit renders updated 75% CPUQuota" || fail_test "Nanobot unit renders updated 75% CPUQuota"
-nb_set_cpu_limit_cmd off >/dev/null 2>&1
-assert_eq 0 "$(nb_cpu_limit)" "nb_set_cpu_limit_cmd off disables CPU limit"
-nb_rendered=$(nb_render_unit)
-[[ $nb_rendered != *"CPUQuota="* && $nb_rendered != *"@NB_CPU_OPTS@"* && $nb_rendered != *"@ROOT@"* && $nb_rendered != *"@GW_PORT@"* ]] &&
-    ok_test "disabled Nanobot CPU limit removes CPUQuota and leaves no placeholders" ||
-    fail_test "disabled Nanobot CPU limit removes CPUQuota and leaves no placeholders"
-nb_set_cpu_limit_cmd 60 >/dev/null 2>&1
-
-printf '%s\n' "$CADDY_OLD_INDEX" >"$WWW_DIR/index.html"
-nb_stale_warn=$(caddy_gen 2>&1 >/dev/null)
-[[ $nb_stale_warn == *"Nanobot is enabled"* && $nb_stale_warn == *"placeholder"* ]] &&
-    ok_test "an enabled Nanobot behind a placeholder fallback warns at deploy time" ||
-    fail_test "an enabled Nanobot behind a placeholder fallback warns at deploy time"
-
-printf 'n\n' | nb_remove >/dev/null 2>&1
-assert_eq "false" "$(nb_enabled && echo true || echo false)" "nb_remove disables Nanobot"
-assert_file_not_contains "$CADDYFILE" "handle @nb_proxy" "disabling Nanobot removes proxy routes from Caddyfile"
-assert_file_not_contains "$CADDYFILE" "127.0.0.1:8765" "disabling Nanobot removes NB_PORT from Caddyfile"
-rm -rf "$NB_DIR"
-
 # Disguise health check: read-only, and it must never abort its caller
 if cert_out=$(cert_summary); then
     ok_test "cert_summary never fails, whatever the probe finds"
@@ -809,8 +705,7 @@ help_output=$(bash "$PROJECT/vpsm.sh" help)
 [[ $help_output == *"single-node multi-user"* ]] && ok_test "English CLI help is available" || fail_test "English CLI help is available"
 menu_output=$(printf '0\n' | bash "$PROJECT/vpsm.sh" 2>/dev/null)
 if [[ $menu_output == *"1) Change SSH port"* && $menu_output == *"11) Check disguise health"* &&
-    $menu_output == *"17) Manage FuturesView panel"* && $menu_output == *"18) Manage Nanobot panel"* &&
-    $menu_output == *"19) Uninstall vpsm"* ]]; then
+    $menu_output == *"17) Manage FuturesView panel"* && $menu_output == *"18) Uninstall vpsm"* ]]; then
     ok_test "interactive CLI renders the complete numeric panel"
 else
     fail_test "interactive CLI renders the complete numeric panel"
@@ -864,6 +759,119 @@ fi
 assert_file_contains "$CUSTOM_RULES" "good.example.com" "edit_rules restores previous valid rules on failure"
 : >"$CUSTOM_RULES"
 sub_regen force >/dev/null 2>&1
+
+# Regression tests for security, concurrency, and runtime hardening fixes
+# 1. SSRF redirect protection in extra_sub_fetch
+cat >"$TMP/stubs/curl-redir" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CURL_REDIR_LOG"
+out="" hdr=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -o) out=$2; shift 2 ;;
+        -D) hdr=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [[ -n $hdr ]]; then
+    printf 'HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:10085/secret\r\n\r\n' >"$hdr"
+fi
+: >"$out"
+printf '302\thttp://127.0.0.1:10085/secret'
+EOF
+chmod 755 "$TMP/stubs/curl-redir"
+export CURL_REDIR_LOG="$TMP/curl-redir.log"
+: >"$CURL_REDIR_LOG"
+mkdir -p "$TMP/redir-bin"
+cp "$TMP/stubs/curl-redir" "$TMP/redir-bin/curl"
+if ( PATH="$TMP/redir-bin:$PATH" extra_sub_fetch redir https://subscriptions.example/start.yaml ) >/dev/null 2>&1; then
+    fail_test "extra_sub_fetch rejects 302 redirect to loopback SSRF target"
+else
+    ok_test "extra_sub_fetch rejects 302 redirect to loopback SSRF target"
+fi
+assert_file_not_contains "$CURL_REDIR_LOG" "127.0.0.1:10085" "curl never requests forbidden redirect destination"
+
+# 2. Failed async external refresh does not lock out immediate retry
+rm -f "$EXTRA_REFRESH_STAMP"
+db_write '.settings.extra_subs = [{alias:"retrytest",url:"https://subscriptions.example/clash.yaml",filter:""}]'
+CURL_STUB_FAIL=1 extra_sub_async_refresh >/dev/null 2>&1
+[[ ! -e $EXTRA_REFRESH_STAMP ]] &&
+    ok_test "failed async external refresh does not write cooldown stamp" ||
+    fail_test "failed async external refresh does not write cooldown stamp"
+extra_sub_async_refresh >/dev/null 2>&1
+[[ -f $EXTRA_REFRESH_STAMP && -f $SUB_EXTRA/retrytest.proxies.yaml ]] &&
+    ok_test "async external refresh recovers immediately on next attempt after failure" ||
+    fail_test "async external refresh recovers immediately on next attempt after failure"
+db_write '.settings.extra_subs = []'
+rm -f "$SUB_EXTRA/retrytest".* "$EXTRA_REFRESH_STAMP"
+sub_regen force >/dev/null 2>&1
+
+# 3. FuturesView non-root hardening, non-443 Host/Origin allowlist, and static cleanup
+fv_rendered=$(fv_render_unit)
+[[ $fv_rendered == *"User=vpsm-fv"* && $fv_rendered == *"Group=vpsm-fv"* &&
+    $fv_rendered == *"ProtectSystem=strict"* && $fv_rendered == *"ReadWritePaths="* ]] &&
+    ok_test "FuturesView unit runs unprivileged with strict filesystem isolation" ||
+    fail_test "FuturesView unit runs unprivileged with strict filesystem isolation"
+db_write '.settings.port = 8444'
+fv_rendered=$(fv_render_unit)
+[[ $fv_rendered == *"FT_WEB_ALLOWED_HOSTS=127.0.0.1,localhost,node.example.com,node.example.com:8444"* &&
+    $fv_rendered == *"FT_WEB_ALLOWED_ORIGINS=https://node.example.com:8444,http://node.example.com:8444,"* ]] &&
+    ok_test "FuturesView unit includes non-443 port in allowed hosts and origins" ||
+    fail_test "FuturesView unit includes non-443 port in allowed hosts and origins"
+db_write '.settings.port = 443'
+mkdir -p "$FV_DIR/web/static" "$WWW_DIR"
+printf 'new\n' >"$FV_DIR/web/static/index.html"
+printf 'stale\n' >"$WWW_DIR/old-chunk.js"
+fv_sync_static_assets
+[[ ! -e $WWW_DIR/old-chunk.js && -f $WWW_DIR/index.html ]] &&
+    ok_test "fv_sync_static_assets removes stale frontend build artifacts" ||
+    fail_test "fv_sync_static_assets removes stale frontend build artifacts"
+rm -rf "$FV_DIR"
+
+# 4. update_cmd all continues after a subshell failure
+if (
+    update_core() { err "core failed"; }
+    update_caddy() { : >"$TMP/caddy-updated"; }
+    update_sh() { : >"$TMP/sh-updated"; }
+    update_cmd all
+) >/dev/null 2>&1; then
+    fail_test "update_cmd all exits non-zero when one component fails"
+else
+    ok_test "update_cmd all exits non-zero when one component fails"
+fi
+[[ -f $TMP/caddy-updated && -f $TMP/sh-updated ]] &&
+    ok_test "update_cmd all continues updating remaining components after failure" ||
+    fail_test "update_cmd all continues updating remaining components after failure"
+
+# 5. edit_rules validates YAML even when zero active users exist
+user_disable alice >/dev/null 2>&1
+user_disable bob >/dev/null 2>&1
+printf 'DOMAIN-SUFFIX,good-zero.example.com,Proxy\n' >"$CUSTOM_RULES"
+if ( EDITOR="$bad_editor" edit_rules ) >/dev/null 2>&1; then
+    fail_test "edit_rules rejects invalid YAML even when all users are disabled"
+else
+    ok_test "edit_rules rejects invalid YAML even when all users are disabled"
+fi
+assert_file_contains "$CUSTOM_RULES" "good-zero.example.com" "edit_rules preserves valid rules when zero users are active"
+: >"$CUSTOM_RULES"
+user_enable alice >/dev/null 2>&1
+user_enable bob >/dev/null 2>&1
+sub_regen force >/dev/null 2>&1
+
+# 6. ssh_change_port rejects internal vpsm ports and Xray port
+for bad_ssh_port in 443 8443 10085 8888; do
+    if ( ssh_change_port "$bad_ssh_port" ) >/dev/null 2>&1; then
+        fail_test "ssh_change_port rejects reserved/Xray port $bad_ssh_port"
+    else
+        ok_test "ssh_change_port rejects reserved/Xray port $bad_ssh_port"
+    fi
+done
+
+# 7. subscription_menu rejects non-existent usernames cleanly
+sub_menu_out=$(printf '8\nno_such_user\n\n0\n' | bash "$PROJECT/vpsm.sh" 2>&1)
+[[ $sub_menu_out == *"does not exist"* && $sub_menu_out != *"Clash subscription:"* ]] &&
+    ok_test "subscription_menu rejects missing user without printing empty URLs" ||
+    fail_test "subscription_menu rejects missing user without printing empty URLs"
 
 printf '\n%d tests passed, %d failed\n' "$PASS" "$FAIL"
 ((FAIL == 0))

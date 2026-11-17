@@ -4,7 +4,7 @@
 install_units() {
     UNITS_CHANGED=""
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
-    local units=(vpsm-xray.service vpsm-caddy.service vpsm-traffic.service vpsm-traffic.timer vpsm-firewall.service vpsm-futures-view.service vpsm-nanobot.service vpsm-extra-sub.service vpsm-extra-sub.path)
+    local units=(vpsm-xray.service vpsm-caddy.service vpsm-traffic.service vpsm-traffic.timer vpsm-firewall.service vpsm-futures-view.service vpsm-extra-sub.service vpsm-extra-sub.path)
     local u dst new f base domain port
     domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
     port=$(fv_port 2>/dev/null || echo "8888")
@@ -13,8 +13,6 @@ install_units() {
         [[ -f $SH_DIR/systemd/$u ]] || continue
         if [[ $u == "vpsm-futures-view.service" ]] && declare -F fv_render_unit >/dev/null; then
             new=$(fv_render_unit)
-        elif [[ $u == "vpsm-nanobot.service" ]] && declare -F nb_render_unit >/dev/null; then
-            new=$(nb_render_unit)
         else
             new=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/$u")
         fi
@@ -27,7 +25,7 @@ install_units() {
         [[ -e $f ]] || continue
         base=${f##*/}
         [[ " ${units[*]} " == *" $base "* ]] && continue
-        grep -qF 'vpsm.sh' "$f" 2>/dev/null || continue
+        [[ $base == vpsm-nanobot.service ]] || grep -qF 'vpsm.sh' "$f" 2>/dev/null || continue
         systemctl disable --now "$base" >/dev/null 2>&1 || true
         rm -f "$f"
         UNITS_CHANGED+=" $base"
@@ -42,7 +40,6 @@ restart_changed_units() {
             vpsm-xray.service) xray_active && xray_restart force && ok "Restarted $XRAY_SVC (unit updated)" ;;
             vpsm-caddy.service) svc_active "$CADDY_SVC" && svc restart "$CADDY_SVC" && ok "Restarted $CADDY_SVC (unit updated)" ;;
             vpsm-futures-view.service) fv_enabled && svc_active "$FV_SVC" && svc restart "$FV_SVC" && ok "Restarted $FV_SVC (unit updated)" ;;
-            vpsm-nanobot.service) nb_enabled && svc_active "$NB_SVC" && svc restart "$NB_SVC" && ok "Restarted $NB_SVC (unit updated)" ;;
             vpsm-traffic.timer) svc try-restart vpsm-traffic.timer ;;
             vpsm-firewall.service) svc try-restart "$FW_SVC" ;;
             vpsm-extra-sub.path) svc try-restart vpsm-extra-sub.path ;;
@@ -56,9 +53,8 @@ svc_targets() {
         xray) echo "$XRAY_SVC" ;;
         caddy) echo "$CADDY_SVC" ;;
         fv | futures-view) echo "$FV_SVC" ;;
-        nb | nanobot) echo "$NB_SVC" ;;
-        all | "") echo "$XRAY_SVC $CADDY_SVC$(fv_enabled && echo " $FV_SVC")$(nb_enabled && echo " $NB_SVC")" ;;
-        *) err "Unknown target: $1 (choose xray | caddy | fv | nb | all)" ;;
+        all | "") echo "$XRAY_SVC $CADDY_SVC$(fv_enabled && echo " $FV_SVC")" ;;
+        *) err "Unknown target: $1 (choose xray | caddy | fv | all)" ;;
     esac
 }
 svc_start() {
@@ -96,13 +92,6 @@ svc_restart() {
             ok "Restarted $FV_SVC"
         fi
     fi
-    if [[ $t == nb || $t == nanobot || ($t == all && $(nb_enabled && echo 1 || echo 0) == 1) ]]; then
-        if svc_active "$NB_SVC" || nb_enabled; then
-            svc restart "$NB_SVC"
-            svc_settled "$NB_SVC" || err "Nanobot failed to stay up after restart, check: journalctl -u $NB_SVC -n 50"
-            ok "Restarted $NB_SVC"
-        fi
-    fi
 }
 
 show_node_info() {
@@ -126,9 +115,6 @@ show_status() {
     if fv_enabled || [[ -d $FV_DIR ]]; then
         svcs+=("$FV_SVC")
     fi
-    if nb_enabled || [[ -d $NB_DIR ]]; then
-        svcs+=("$NB_SVC")
-    fi
     for s in "${svcs[@]}"; do
         state=$(systemctl is-active "$s" 2>/dev/null || echo "inactive")
         rss="-"
@@ -144,7 +130,6 @@ show_status() {
     echo "Xray version:  ${ver:-unknown}"
     echo "Caddy version: $(cat "$BIN_DIR/caddy.version" 2>/dev/null || echo unknown)"
     echo "FuturesView:   $([[ -d $FV_DIR/.git ]] && echo "installed ($(fv_enabled && echo "enabled" || echo "disabled"))" || echo "not installed")"
-    echo "Nanobot:       $([[ -x $NB_DIR/.venv/bin/nanobot ]] && echo "installed ($(nb_enabled && echo "enabled" || echo "disabled"))" || echo "not installed")"
     echo "TLS cert:      $(cert_summary)"
     echo "Domain/port:   $(db_get '.settings.domain'):$(db_get '.settings.port')"
     echo "Node name:     $(node_name)"
@@ -162,9 +147,8 @@ show_log() {
         xray) journalctl -u "$XRAY_SVC" -n 100 --no-pager -f ;;
         caddy) journalctl -u "$CADDY_SVC" -n 100 --no-pager -f ;;
         fv | futures-view) journalctl -u "$FV_SVC" -n 100 --no-pager -f ;;
-        nb | nanobot) journalctl -u "$NB_SVC" -n 100 --no-pager -f ;;
         sync | traffic) journalctl -u vpsm-traffic.service -n 100 --no-pager ;;
-        *) err "Usage: vpsm log [xray|caddy|fv|nb|sync]" ;;
+        *) err "Usage: vpsm log [xray|caddy|fv|sync]" ;;
     esac
 }
 
@@ -303,9 +287,9 @@ update_cmd() {
         sh | script) update_sh "${2:-}" ;;
         all)
             local rc=0
-            update_core || rc=1
-            update_caddy || rc=1
-            update_sh || rc=1
+            (update_core) || rc=1
+            (update_caddy) || rc=1
+            (update_sh) || rc=1
             return "$rc"
             ;;
         *) err "Usage: vpsm update [core|caddy|sh|all] [version]" ;;
@@ -369,7 +353,6 @@ do_uninstall() {
     svc disable --now "$XRAY_SVC" 2>/dev/null
     svc disable --now "$CADDY_SVC" 2>/dev/null
     svc disable --now "$FV_SVC" 2>/dev/null
-    svc disable --now "$NB_SVC" 2>/dev/null
     svc disable --now "$FW_SVC" 2>/dev/null
     fw_flush_all
     if swap_is_managed; then
@@ -382,10 +365,11 @@ do_uninstall() {
         ok "Uninstalled (dry run)"
         return 0
     fi
-    rm -f /etc/systemd/system/vpsm-{xray,caddy,traffic,firewall,futures-view,nanobot,extra-sub}.service /etc/systemd/system/vpsm-{traffic.timer,extra-sub.path}
+    rm -f /etc/systemd/system/vpsm-{xray,caddy,traffic,firewall,futures-view,extra-sub}.service /etc/systemd/system/vpsm-{traffic.timer,extra-sub.path}
     rm -f /usr/local/bin/vpsm /etc/sysctl.d/99-vpsm-bbr.conf
     systemctl daemon-reload
     userdel "$SVC_USER" 2>/dev/null
+    userdel "$FV_USER" 2>/dev/null
     rm -rf "$ROOT"
     ok "Uninstalled"
 }
@@ -432,10 +416,9 @@ System:
   sync                              Sync traffic, quota and expiry now
   status                            Show service and security status
   check                             Probe the fallback site the way a censor does
-  start|stop|restart [xray|caddy|fv|nb|all]
-  log [xray|caddy|fv|nb|sync]
+  start|stop|restart [xray|caddy|fv|all]
+  log [xray|caddy|fv|sync]
   fv [deploy|update|status|password|apikey|cpu|restart|log|remove] Manage FuturesView web panel
-  nb [deploy|update|status|password|cpu|restart|log|remove]        Manage Nanobot web panel
   update [core|caddy|sh|all]        Update components and scripts, not the kernel
   kernel [-y]                       Update system packages and kernel safely
   bbr                               Enable BBR

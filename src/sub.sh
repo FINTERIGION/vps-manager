@@ -162,8 +162,13 @@ sub_regen() {
 
     if [[ -n $full ]]; then
         yamls=("$stage"/sub/*.yaml)
-        if [[ -e ${yamls[0]} ]]; then
-            if ! python3 - "${yamls[@]}" <<'PY'
+        if [[ ! -e ${yamls[0]} ]]; then
+            sub_render_clash "_validate" "00000000-0000-0000-0000-000000000000" "$stage/ex/server-rules" \
+                "$stage/ex/proxies" "$stage/ex/names" >"$stage/.validate.yaml" ||
+                { rm -rf "$stage"; warn "Failed to render the subscription validation YAML"; return 1; }
+            yamls=("$stage/.validate.yaml")
+        fi
+        if ! python3 - "${yamls[@]}" <<'PY'
 import sys
 import yaml
 for path in sys.argv[1:]:
@@ -174,11 +179,10 @@ for path in sys.argv[1:]:
         print(f"{path}: {exc}", file=sys.stderr)
         raise SystemExit(1)
 PY
-            then
-                rm -rf "$stage"
-                warn "Generated subscriptions are not valid YAML; subscriptions were not changed"
-                return 1
-            fi
+        then
+            rm -rf "$stage"
+            warn "Generated subscriptions are not valid YAML; subscriptions were not changed"
+            return 1
         fi
     fi
 

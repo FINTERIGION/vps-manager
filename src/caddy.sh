@@ -87,15 +87,6 @@ fv_port() {
     db_get '.settings.futures_view.port // 8888'
 }
 
-nb_enabled() {
-    [[ -f $DB ]] || return 1
-    [[ $(db_get '.settings.nanobot.enabled // false') == true ]]
-}
-
-nb_port() {
-    db_get '.settings.nanobot.port // 8765'
-}
-
 caddy_stale() {
     local domain port want
     [[ -f $CADDYFILE ]] || return 0
@@ -114,18 +105,12 @@ caddy_stale() {
     else
         grep -qF "127.0.0.1:$(fv_port)" "$CADDYFILE" && return 0
     fi
-    if nb_enabled; then
-        grep -qF "127.0.0.1:$(nb_port)" "$CADDYFILE" || return 0
-        grep -qF "/webui/*" "$CADDYFILE" || return 0
-    else
-        grep -qF "127.0.0.1:$(nb_port)" "$CADDYFILE" && return 0
-    fi
     grep -qF "vpsm-http-redirect-only" "$CADDYFILE" && return 1
     return 0
 }
 
 caddy_gen() {
-    local domain port tmp panel_handle="" nb_p
+    local domain port tmp fv_handle=""
     domain=$(db_get '.settings.domain')
     port=$(db_get '.settings.port')
     [[ $port == 443 ]] && port="" || port=":$port"
@@ -139,8 +124,6 @@ caddy_gen() {
     if [[ ! -f $WWW_DIR/index.html ]] || grep -qF "$CADDY_OLD_INDEX" "$WWW_DIR/index.html"; then
         if fv_enabled; then
             warn "FuturesView is enabled but $WWW_DIR/index.html is missing or stale, so a generated placeholder is being served (run: vpsm fv update)"
-        elif nb_enabled; then
-            warn "Nanobot is enabled but $WWW_DIR/index.html is missing or stale, so a generated placeholder is being served (run: vpsm nb update)"
         fi
         caddy_gen_index >"$WWW_DIR/index.html"
         chmod 644 "$WWW_DIR/index.html"
@@ -148,30 +131,8 @@ caddy_gen() {
     caddy_gen_favicon
 
     if fv_enabled; then
-        panel_handle="	handle /api/* {
+        fv_handle="	handle /api/* {
 		reverse_proxy 127.0.0.1:$(fv_port)
-	}
-"
-    elif nb_enabled; then
-        nb_p=$(nb_port)
-        panel_handle="	@nb_ws {
-		header Connection *Upgrade*
-		header Upgrade websocket
-	}
-	handle @nb_ws {
-		reverse_proxy 127.0.0.1:$nb_p {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto https
-		}
-	}
-	@nb_proxy path /webui /webui/* /api /api/* /auth /auth/* /ws /ws/* /issue-token /oauth /oauth/* /health
-	handle @nb_proxy {
-		reverse_proxy 127.0.0.1:$nb_p {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto https
-		}
 	}
 "
     fi
@@ -222,7 +183,7 @@ $domain:$CADDY_PORT {
 	log_skip @not_sub
 	import site
 	import $CADDY_USERS/*.conf
-${panel_handle}	handle {
+${fv_handle}	handle {
 		log_skip
 		try_files {path} /index.html
 		file_server

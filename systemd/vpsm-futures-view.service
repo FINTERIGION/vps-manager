@@ -5,18 +5,19 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=@FV_USER@
+Group=@FV_USER@
 WorkingDirectory=@ROOT@/futures-view
 EnvironmentFile=-@ROOT@/futures-view/.env
-Environment=FT_WEB_ALLOWED_HOSTS=127.0.0.1,localhost,@DOMAIN@
-Environment=FT_WEB_ALLOWED_ORIGINS=https://@DOMAIN@,http://@DOMAIN@
+Environment=FT_WEB_ALLOWED_HOSTS=@FV_ALLOWED_HOSTS@
+Environment=FT_WEB_ALLOWED_ORIGINS=@FV_ALLOWED_ORIGINS@
 ExecStart=@ROOT@/futures-view/.venv/bin/python main.py web --host 127.0.0.1 --port @PORT@
-# Hardening that leaves every filesystem write path untouched, so backtesting is
-# unaffected. Dropping to a non-root user with ProtectSystem=strict is deferred
-# until the panel's runtime write paths are mapped on a real deployment; the
-# capability set is left alone for the same reason.
+CapabilityBoundingSet=
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -27,6 +28,7 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 RestrictNamespaces=true
 LockPersonality=true
+ReadWritePaths=@ROOT@/futures-view
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535

@@ -78,8 +78,13 @@ ssh_rewrite_ports() {
 }
 
 ssh_change_port() {
-    local new=${1:-} old unit="" socket_dir backup had_dropin="" had_socket="" had_fw="" configured rewrite_failed="" p
+    local new=${1:-} old unit="" socket_dir backup had_dropin="" had_socket="" had_fw="" configured rewrite_failed="" p xray_port=""
     valid_port "$new" || err "Usage: vpsm ssh-port <1-65535>"
+    valid_xray_port "$new" || err "Port $new is used internally by vpsm (80 / $CADDY_PORT / $API_PORT / $FV_PORT), choose another"
+    if [[ -f $DB ]]; then
+        xray_port=$(db_get '.settings.port // empty' 2>/dev/null || true)
+        [[ -n $xray_port && $new == "$xray_port" ]] && err "Port $new is the Xray listen port, choose another"
+    fi
     cmd_exists sshd || err "OpenSSH server (sshd) is not installed"
     [[ -f $SSH_ROOT/sshd_config ]] || err "$SSH_ROOT/sshd_config not found"
     configured=$(fw_sshd_ports | tr '\n' ' ')

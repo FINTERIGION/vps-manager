@@ -31,35 +31,66 @@ extra_sub_check_filter() {
 }
 
 extra_sub_check_url() {
-    timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-url "${1:-}" ||
+    local strict_flag=()
+    [[ -z ${VPSM_NO_SERVICE:-} ]] && strict_flag=(--strict)
+    timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-url "${strict_flag[@]}" "${1:-}" ||
         err "Invalid or forbidden subscription URL (cannot point to private, loopback, or cloud metadata addresses)"
 }
 
 extra_sub_fetch() {
     local alias=$1 url=$2 filter=${3:-} force=${4:-} dest_dir=${5:-$SUB_EXTRA}
-    local stamp="$dest_dir/$alias.stamp" tmp size rc
+    local stamp="$dest_dir/$alias.stamp" tmp size rc hop cur_url resolve_arg meta code redir
+    local strict_flag=() curl_opts=()
+    [[ -z ${VPSM_NO_SERVICE:-} ]] && strict_flag=(--strict)
     [[ $url =~ ^https?:// ]] || { warn "External subscription $alias has an invalid URL"; return 1; }
-    timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-url "$url" >/dev/null 2>&1 || {
-        warn "External subscription $alias has a forbidden URL (loopback or private address)"
-        return 1
-    }
     tmp=$(mktemp -d "$ROOT/.extra.XXXXXX") || return 1
-    # Providers often block unknown clients, so always present a Clash/Mihomo UA
-    rc=0
-    curl -fSL --max-redirs 3 --retry 2 --connect-timeout 10 --max-time 45 \
-        --max-filesize "$EXTRA_MAX_BYTES" --proto '=http,https' --proto-redir '=http,https' \
-        -A "$EXTRA_UA" -o "$tmp/source.yaml" "$url" || rc=$?
-    if ((rc != 0)); then
-        rm -rf "$tmp"
-        if ((rc == 22)); then
-            warn "Failed to download external subscription $alias (HTTP error, the URL may be expired or blocked)"
-        elif ((rc == 63)); then
-            warn "Failed to download external subscription $alias (file exceeds ${EXTRA_MAX_BYTES} bytes)"
-        else
-            warn "Failed to download external subscription $alias (curl exit $rc)"
+    cur_url=$url
+    for hop in 0 1 2 3; do
+        if ! resolve_arg=$(timeout 20 python3 "$SH_DIR/src/extra_sub.py" check-url "${strict_flag[@]}" --print-resolve "$cur_url" 2>/dev/null); then
+            rm -rf "$tmp"
+            warn "External subscription $alias has a forbidden or unresolvable URL"
+            return 1
         fi
-        return 1
-    fi
+        curl_opts=()
+        [[ -n $resolve_arg ]] && curl_opts+=(--resolve "$resolve_arg")
+        rm -f "$tmp/headers" "$tmp/source.yaml"
+        # Disable curl's built-in -L redirect following so each hop is SSRF-validated
+        # before connecting, and pin DNS via --resolve when resolved.
+        rc=0
+        meta=$(curl -fsS --max-redirs 0 --retry 2 --connect-timeout 10 --max-time 45 \
+            --max-filesize "$EXTRA_MAX_BYTES" --proto '=http,https' \
+            "${curl_opts[@]}" -A "$EXTRA_UA" -D "$tmp/headers" -o "$tmp/source.yaml" \
+            -w '%{http_code}\t%{redirect_url}' "$cur_url") || rc=$?
+        if ((rc != 0)); then
+            rm -rf "$tmp"
+            if ((rc == 22)); then
+                warn "Failed to download external subscription $alias (HTTP error, the URL may be expired or blocked)"
+            elif ((rc == 63)); then
+                warn "Failed to download external subscription $alias (file exceeds ${EXTRA_MAX_BYTES} bytes)"
+            else
+                warn "Failed to download external subscription $alias (curl exit $rc)"
+            fi
+            return 1
+        fi
+        IFS=$'\t' read -r code redir <<<"$meta"
+        if [[ -z $redir && -f $tmp/headers ]]; then
+            redir=$(awk 'tolower($1) == "location:" { sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$tmp/headers")
+        fi
+        if [[ $code == 30[12378] && -n $redir ]]; then
+            if ((hop == 3)); then
+                rm -rf "$tmp"
+                warn "Failed to download external subscription $alias (too many redirects)"
+                return 1
+            fi
+            if ! cur_url=$(timeout 20 python3 "$SH_DIR/src/extra_sub.py" resolve-redirect "${strict_flag[@]}" "$cur_url" "$redir" 2>/dev/null); then
+                rm -rf "$tmp"
+                warn "External subscription $alias redirected to a forbidden URL"
+                return 1
+            fi
+            continue
+        fi
+        break
+    done
     size=$(stat -c %s "$tmp/source.yaml" 2>/dev/null || echo 0)
     if ! is_uint "$size" || ((size == 0 || size > EXTRA_MAX_BYTES)); then
         rm -rf "$tmp"
@@ -207,20 +238,21 @@ extra_sub_async_refresh() {
             return 0
         fi
     fi
-    touch "$EXTRA_REFRESH_STAMP" 2>/dev/null || true
-
-    local tmp alias url filter changed=""
+    local tmp alias url filter changed="" any_ok=""
     tmp=$(mktemp -d "$ROOT/.extra.async.XXXXXX") || return 1
 
     while IFS=$'\t' read -r alias url filter; do
         [[ -n $alias && -n $url ]] || continue
         if extra_sub_fetch "$alias" "$url" "$filter" force "$tmp"; then
+            any_ok=1
             if ! cmp -s "$tmp/$alias.proxies.yaml" "$SUB_EXTRA/$alias.proxies.yaml" 2>/dev/null || \
                ! cmp -s "$tmp/$alias.names.yaml" "$SUB_EXTRA/$alias.names.yaml" 2>/dev/null; then
                 changed=1
             fi
         fi
     done < <(db_get '.settings.extra_subs[]? | "\(.alias)\t\(.url)\t\(.filter // "")"')
+
+    [[ -n $any_ok ]] && touch "$EXTRA_REFRESH_STAMP" 2>/dev/null || true
 
     if [[ -z $changed ]]; then
         rm -rf "$tmp"

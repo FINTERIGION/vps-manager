@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.5.2"
+VPSM_VERSION="1.5.3"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -45,15 +45,8 @@ CADDY_PORT=8443
 FV_PORT=8888
 FV_DIR="$ROOT/futures-view"
 FV_SVC="vpsm-futures-view"
+FV_USER="vpsm-fv"
 FV_REPO="https://github.com/FINTERIGION/futures-view.git"
-NB_PORT=8765
-NB_GW_PORT=18790
-NB_DIR="$ROOT/nanobot"
-NB_CONF="$NB_DIR/config.json"
-NB_WORKSPACE="$NB_DIR/workspace"
-NB_SVC="vpsm-nanobot"
-NB_REPO="HKUDS/nanobot"
-NB_PKG="nanobot-ai"
 INBOUND_TAG="vless-reality"
 XRAY_SVC="vpsm-xray"
 CADDY_SVC="vpsm-caddy"
@@ -188,8 +181,7 @@ db_migrate() {
     db_write 'if (.settings.expire // null) == null then .settings.expire = (.users[0].expire // "") else . end
         | .settings.extra_subs = (.settings.extra_subs // [])
         | .settings.futures_view = ({enabled: false, port: 8888, repo: "https://github.com/FINTERIGION/futures-view.git", password: "", cpu_limit: 60, dce_api_key: "", dce_secret: ""} + (.settings.futures_view // {}))
-        | .settings.nanobot = ({enabled: false, port: 8765, gw_port: 18790, pkg: "nanobot-ai", version: "", password: "", cpu_limit: 60} + (.settings.nanobot // {}))
-        | del(.settings.ssh_port, .settings.cdn)
+        | del(.settings.ssh_port, .settings.cdn, .settings.nanobot)
         | .users |= map(del(.expire, .sources, .extra_subs))'
 }
 
@@ -198,41 +190,10 @@ user_get() { jq -r --arg n "$1" ".users[]|select(.name==\$n)|$2" "$DB"; }
 
 gen_hex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 gen_uuid() { cat /proc/sys/kernel/random/uuid; }
-gen_panel_password() {
-    local pass=""
-    # 256 bytes of urandom yield about 62 alphanumeric characters, so the
-    # 20-character target is always met.
-    if [[ -r /dev/urandom ]]; then
-        pass=$(head -c 256 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 20)
-    fi
-    if ((${#pass} < 16)) && command -v openssl >/dev/null 2>&1; then
-        pass=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 20)
-    fi
-    # Deliberately no timestamp/$RANDOM fallback: panel login is reachable
-    # through the public proxy, so a guessable password would compromise the disguise.
-    if ((${#pass} < 16)); then
-        warn "Cannot generate a strong password: neither /dev/urandom nor openssl produced enough entropy"
-        return 1
-    fi
-    printf '%s\n' "$pass"
-    return 0
-}
-parse_cpu_limit() {
-    local val=${1%%% }
-    val=${val%%%}
-    case ${val,,} in
-        off | disable | disabled | 0 | none | unlimited) printf '0\n'; return 0 ;;
-    esac
-    if [[ $val =~ ^[1-9][0-9]*$ ]] && ((val >= 5 && val <= 1000)); then
-        printf '%s\n' "$val"
-        return 0
-    fi
-    return 1
-}
 valid_name() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ && $1 != all ]]; }
 valid_domain() { [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]; }
 valid_port() { [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && (($1 <= 65535)); }
-valid_xray_port() { valid_port "$1" && (($1 != 80 && $1 != CADDY_PORT && $1 != API_PORT && $1 != FV_PORT && $1 != NB_PORT && $1 != NB_GW_PORT)); }
+valid_xray_port() { valid_port "$1" && (($1 != 80 && $1 != CADDY_PORT && $1 != API_PORT && $1 != FV_PORT)); }
 valid_shortid() { [[ $1 =~ ^([0-9a-fA-F]{2}){1,8}$ ]]; }
 is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
 

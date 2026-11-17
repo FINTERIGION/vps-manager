@@ -2,7 +2,68 @@
 # vpsm - FuturesView deployment, update, and password management
 
 fv_gen_password() {
-    gen_panel_password
+    local pass=""
+    # 256 bytes of urandom yield about 62 alphanumeric characters, so the
+    # 20-character target is always met. 64 bytes reached it only ~13% of the
+    # time and silently fell through to the weaker paths below.
+    if [[ -r /dev/urandom ]]; then
+        pass=$(head -c 256 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 20)
+    fi
+    if ((${#pass} < 16)) && command -v openssl >/dev/null 2>&1; then
+        pass=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 20)
+    fi
+    # Deliberately no timestamp/$RANDOM fallback: the panel login is reachable
+    # through the public /api/* proxy, so a guessable password would hand over
+    # the very site that is supposed to be the disguise. Returns non-zero rather
+    # than calling err(), because callers use a command substitution and an
+    # exit inside it would only kill the subshell, yielding an empty password.
+    if ((${#pass} < 16)); then
+        warn "Cannot generate a strong password: neither /dev/urandom nor openssl produced enough entropy"
+        return 1
+    fi
+    printf '%s\n' "$pass"
+    return 0
+}
+
+fv_ensure_user() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    if ! getent passwd "$FV_USER" >/dev/null 2>&1; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin "$FV_USER" ||
+            useradd --system --no-create-home --shell /sbin/nologin "$FV_USER" ||
+            err "Failed to create system user $FV_USER"
+    fi
+}
+
+fv_fix_perms() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    [[ -d $FV_DIR ]] || return 0
+    fv_ensure_user
+    chown -R "$FV_USER:$FV_USER" "$FV_DIR"
+    if [[ -f $FV_DIR/.env ]]; then
+        chown root:root "$FV_DIR/.env"
+        chmod 600 "$FV_DIR/.env"
+    fi
+}
+
+fv_webui_url() {
+    local domain port
+    domain=$(db_get '.settings.domain')
+    port=$(db_get '.settings.port // 443' 2>/dev/null || echo "443")
+    if [[ $port == 443 ]]; then
+        printf 'https://%s\n' "$domain"
+    else
+        printf 'https://%s:%s\n' "$domain" "$port"
+    fi
+}
+
+fv_sync_static_assets() {
+    mkdir -p "$WWW_DIR"
+    if [[ -d $FV_DIR/web/static ]] && [[ -n $(find "$FV_DIR/web/static" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
+        find "$WWW_DIR" -mindepth 1 -delete 2>/dev/null || rm -rf "${WWW_DIR:?}"/*
+        cp -r "$FV_DIR/web/static/"* "$WWW_DIR/"
+        find "$WWW_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
+        find "$WWW_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
+    fi
 }
 
 fv_apply_password() {
@@ -12,6 +73,7 @@ fv_apply_password() {
     (
         cd "$FV_DIR" && FV_NEW_PASS="$pass" "$py" -c "import os; from web.auth import set_password; set_password(os.environ['FV_NEW_PASS'])"
     ) || return 1
+    fv_fix_perms
     db_write --arg p "$pass" '.settings.futures_view.password = $p'
 }
 
@@ -83,14 +145,32 @@ fv_sync_env_file() {
 }
 
 fv_render_unit() {
-    local domain port cpu_limit cpu_opts="" content
+    local domain port xray_port cpu_limit cpu_opts="" allowed_hosts allowed_origins content
+    if [[ -z ${VPSM_NO_SERVICE:-} ]] && { fv_enabled || [[ -d $FV_DIR ]]; }; then
+        fv_fix_perms
+    fi
     domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
     port=$(fv_port 2>/dev/null || echo "8888")
+    xray_port=$(db_get '.settings.port // 443' 2>/dev/null || echo "443")
     cpu_limit=$(fv_cpu_limit 2>/dev/null || echo "60")
     if [[ $cpu_limit =~ ^[1-9][0-9]*$ && $cpu_limit -gt 0 ]]; then
         cpu_opts=$(printf 'CPUQuota=%s%%\nNice=15' "$cpu_limit")
     fi
-    content=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/vpsm-futures-view.service")
+    if [[ -n $domain ]]; then
+        if [[ $xray_port == 443 ]]; then
+            allowed_hosts="127.0.0.1,localhost,$domain"
+            allowed_origins="https://$domain,http://$domain"
+        else
+            allowed_hosts="127.0.0.1,localhost,$domain,$domain:$xray_port"
+            allowed_origins="https://$domain:$xray_port,http://$domain:$xray_port,https://$domain,http://$domain"
+        fi
+    else
+        allowed_hosts="127.0.0.1,localhost"
+        allowed_origins="https://127.0.0.1,http://127.0.0.1"
+    fi
+    content=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" \
+        -e "s#@FV_USER@#$FV_USER#g" -e "s#@FV_ALLOWED_HOSTS@#$allowed_hosts#g" \
+        -e "s#@FV_ALLOWED_ORIGINS@#$allowed_origins#g" "$SH_DIR/systemd/vpsm-futures-view.service")
     if [[ -n $cpu_opts ]]; then
         content="${content//@FV_CPU_OPTS@/$cpu_opts}"
     else
@@ -101,8 +181,7 @@ fv_render_unit() {
 }
 
 fv_status() {
-    local state pid rss="-" domain port pwd cpu_lim dce_k dce_s
-    domain=$(db_get '.settings.domain')
+    local state pid rss="-" port pwd cpu_lim dce_k dce_s
     port=$(fv_port)
     pwd=$(fv_get_password)
     cpu_lim=$(fv_cpu_limit)
@@ -110,7 +189,7 @@ fv_status() {
     dce_s=$(fv_get_dce_secret)
     echo "=== FuturesView Panel Status ==="
     echo "Enabled:       $(fv_enabled && echo "yes" || echo "no")"
-    echo "Repository:    $FV_DIR $([[ -d $FV_DIR/.git ]] && echo "(git $(git -C "$FV_DIR" rev-parse --short HEAD 2>/dev/null || echo "cloned"))" || echo "(not cloned)")"
+    echo "Repository:    $FV_DIR $([[ -d $FV_DIR/.git ]] && echo "(git $(git -c safe.directory="$FV_DIR" -C "$FV_DIR" rev-parse --short HEAD 2>/dev/null || echo "cloned"))" || echo "(not cloned)")"
     echo "Virtualenv:    $([[ -x $FV_DIR/.venv/bin/python ]] && echo "installed ($("$FV_DIR/.venv/bin/python" --version 2>/dev/null))" || echo "missing")"
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         state=$(systemctl is-active "$FV_SVC" 2>/dev/null || echo "unknown")
@@ -144,7 +223,7 @@ fv_status() {
         echo "DCE Credentials: Not set"
     fi
     echo "Listen addr:   127.0.0.1:$port"
-    echo "WebUI URL:     https://$domain"
+    echo "WebUI URL:     $(fv_webui_url)"
     if [[ ${1:-} == --show-password ]]; then
         echo "WebUI Pass:    ${pwd:-"(none / not set)"}"
     elif [[ -n $pwd ]]; then
@@ -156,7 +235,43 @@ fv_status() {
     fi
 }
 
+fv_install_node22() {
+    local narch tmp base name sum
+    case "$(uname -m)" in
+        x86_64 | amd64) narch="x64" ;;
+        aarch64 | arm64) narch="arm64" ;;
+        *) return 1 ;;
+    esac
+    tmp=$(mktemp -d) || return 1
+    base="https://nodejs.org/dist/latest-v22.x"
+    if ! dl "$base/SHASUMS256.txt" "$tmp/sums"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    name=$(awk -v a="linux-$narch.tar.gz" '$2 ~ "^node-v22\\.[0-9]+\\.[0-9]+-" a "$" {print $2; exit}' "$tmp/sums")
+    sum=$(awk -v f="$name" '$2 == f {print $1; exit}' "$tmp/sums")
+    if [[ -z $name || -z $sum ]]; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    msg "Downloading Node.js ($name) with SHA-256 verification ..."
+    if ! dl "$base/$name" "$tmp/node.tgz" || ! verify_sum sha256 "$sum" "$tmp/node.tgz"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    rm -rf "$ROOT/node.new"
+    mkdir -p "$ROOT/node.new"
+    if ! tar -xzf "$tmp/node.tgz" -C "$ROOT/node.new" --strip-components=1; then
+        rm -rf "$tmp" "$ROOT/node.new"
+        return 1
+    fi
+    rm -rf "$tmp" "$ROOT/node"
+    mv -f "$ROOT/node.new" "$ROOT/node"
+    export PATH="$ROOT/node/bin:$PATH"
+}
+
 fv_check_prereqs() {
+    [[ -d $ROOT/node/bin ]] && export PATH="$ROOT/node/bin:$PATH"
     local missing=() p
     for p in git python3 curl; do
         command -v "$p" >/dev/null 2>&1 || missing+=("$p")
@@ -183,11 +298,9 @@ fv_check_prereqs() {
     [[ $node_major =~ ^[0-9]+$ ]] || node_major=0
 
     if ((node_major < 20)) || ! command -v npm >/dev/null 2>&1; then
-        if [[ $EUID -eq 0 ]] && command -v apt-get >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
-            msg "Node.js >= 20 is required for WebUI build (found: ${node_ver:-none}). Installing Node.js 22 LTS via NodeSource ..."
-            curl -fsSL https://deb.nodesource.com/setup_22.x | bash - &&
-                apt-get install -y nodejs ||
-                warn "Failed to install Node.js 22 from NodeSource, attempting default package..."
+        if [[ $EUID -eq 0 ]] && command -v curl >/dev/null 2>&1; then
+            msg "Node.js >= 20 is required for WebUI build (found: ${node_ver:-none}). Installing Node.js 22 LTS ..."
+            fv_install_node22 || warn "Failed to install verified Node.js 22 binary"
         fi
         node_major=0
         if command -v node >/dev/null 2>&1; then
@@ -196,7 +309,7 @@ fv_check_prereqs() {
         fi
         [[ $node_major =~ ^[0-9]+$ ]] || node_major=0
         if ((node_major < 20)) || ! command -v npm >/dev/null 2>&1; then
-            err "Node.js >= 20 and npm are required (found: ${node_ver:-none}). Please install Node.js 20 or 22: curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs"
+            err "Node.js >= 20 and npm are required (found: ${node_ver:-none}). Install Node.js >= 20 manually and retry."
         fi
     fi
 }
@@ -204,7 +317,7 @@ fv_check_prereqs() {
 fv_deploy() {
     need_root
     need_installed
-    local pass domain port
+    local pass url port
 
     echo "=== Deploying FuturesView Web Panel ==="
     fv_check_prereqs
@@ -215,7 +328,7 @@ fv_deploy() {
         git clone "$FV_REPO" "$FV_DIR" || err "Failed to clone $FV_REPO"
     else
         msg "Repository already exists in $FV_DIR, updating..."
-        git -C "$FV_DIR" pull --ff-only 2>/dev/null || warn "git pull failed, using current checkout"
+        git -c safe.directory="$FV_DIR" -C "$FV_DIR" pull --ff-only 2>/dev/null || warn "git pull failed, using current checkout"
     fi
 
     if [[ ! -x $FV_DIR/.venv/bin/python || ! -x $FV_DIR/.venv/bin/pip ]]; then
@@ -248,26 +361,13 @@ fv_deploy() {
         err "Directory $FV_DIR/webui not found"
     fi
 
-    if declare -F nb_enabled >/dev/null && nb_enabled; then
-        msg "Disabling active Nanobot panel before enabling FuturesView (mutually exclusive)..."
-        if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
-            systemctl disable --now "$NB_SVC" 2>/dev/null || true
-        fi
-        db_write '.settings.nanobot.enabled = false'
-    fi
-
     msg "Deploying static assets to Caddy web root ($WWW_DIR) ..."
-    mkdir -p "$WWW_DIR"
-    if [[ -d $FV_DIR/web/static ]]; then
-        find "$WWW_DIR" -mindepth 1 -delete 2>/dev/null || rm -rf "${WWW_DIR:?}"/*
-        cp -r "$FV_DIR/web/static/"* "$WWW_DIR/"
-        find "$WWW_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
-        find "$WWW_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
-    fi
+    fv_sync_static_assets
 
     db_write '.settings.futures_view.enabled = true | if (.settings.futures_view.cpu_limit // null) == null then .settings.futures_view.cpu_limit = 60 else . end'
 
     fv_sync_env_file
+    fv_fix_perms
     install_units
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         systemctl daemon-reload
@@ -278,7 +378,7 @@ fv_deploy() {
     caddy_gen
     caddy_reload
 
-    domain=$(db_get '.settings.domain')
+    url=$(fv_webui_url)
     port=$(fv_port)
     local cpu_lim
     cpu_lim=$(fv_cpu_limit)
@@ -286,15 +386,15 @@ fv_deploy() {
     cat <<EOF
 
 ================ FuturesView Deployment Complete ================
-WebUI URL:      https://$domain
-Camouflage:     Active (serving FuturesView SPA on 443)
-API Reverse:    https://$domain/api/* -> 127.0.0.1:$port
+WebUI URL:      $url
+Camouflage:     Active (serving FuturesView SPA on $(db_get '.settings.port // 443'))
+API Reverse:    $url/api/* -> 127.0.0.1:$port
 CPU Limit:      ${cpu_lim}% (Nice=15, protects proxy latency)
 WebUI Password: $pass
 Service:        $FV_SVC
 
 Notes:
- 1. Access the web panel at https://$domain and unlock it using the password above.
+ 1. Access the web panel at $url and unlock it using the password above.
  2. To change or view the password later, run: vpsm fv password
  3. To configure CPU rate limiting, run: vpsm fv cpu
  4. To update FuturesView after repository changes, run: vpsm fv update
@@ -311,8 +411,8 @@ fv_update() {
     fv_check_prereqs
     msg "Pulling latest code from git ..."
     local branch
-    branch=$(git -C "$FV_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-    if ! git -C "$FV_DIR" pull --ff-only origin "$branch"; then
+    branch=$(git -c safe.directory="$FV_DIR" -C "$FV_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    if ! git -c safe.directory="$FV_DIR" -C "$FV_DIR" pull --ff-only origin "$branch"; then
         err "Failed to git pull in $FV_DIR"
     fi
 
@@ -331,14 +431,10 @@ fv_update() {
     fi
 
     msg "Syncing built static assets to web root ..."
-    mkdir -p "$WWW_DIR"
-    if [[ -d $FV_DIR/web/static ]]; then
-        cp -r "$FV_DIR/web/static/"* "$WWW_DIR/"
-        find "$WWW_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
-        find "$WWW_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
-    fi
+    fv_sync_static_assets
 
     fv_sync_env_file
+    fv_fix_perms
 
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         msg "Restarting $FV_SVC service ..."
@@ -596,9 +692,7 @@ fv_remove() {
         systemctl disable --now "$FV_SVC" 2>/dev/null || true
     fi
     db_write '.settings.futures_view.enabled = false'
-    if ! declare -F nb_enabled >/dev/null || ! nb_enabled; then
-        find "$WWW_DIR" -mindepth 1 -delete 2>/dev/null || rm -rf "${WWW_DIR:?}"/*
-    fi
+    find "$WWW_DIR" -mindepth 1 -delete 2>/dev/null || rm -rf "${WWW_DIR:?}"/*
     caddy_gen
     caddy_reload
     ok "FuturesView disabled and removed from Caddy routing"

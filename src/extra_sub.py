@@ -65,9 +65,15 @@ def fail(message):
 
 def is_forbidden_ip(ip_str):
     try:
-        ip = ipaddress.ip_address(ip_str)
+        ip = ipaddress.ip_address(ip_str.split("%", 1)[0])
         if getattr(ip, "ipv4_mapped", None) is not None:
             ip = ip.ipv4_mapped
+        if getattr(ip, "sixtofour", None) is not None and is_forbidden_ip(str(ip.sixtofour)):
+            return True
+        if getattr(ip, "teredo", None) is not None and any(
+            is_forbidden_ip(str(v4)) for v4 in ip.teredo
+        ):
+            return True
         return (
             not ip.is_global
             or ip.is_loopback
@@ -81,12 +87,21 @@ def is_forbidden_ip(ip_str):
         return False
 
 
-def check_url(url):
+def _is_ip_literal(host):
+    try:
+        ipaddress.ip_address(host.split("%", 1)[0])
+        return True
+    except ValueError:
+        return False
+
+
+def check_url(url, allow_unresolved=True):
     try:
         parsed = urllib.parse.urlsplit(url)
     except Exception as exc:
         fail(f"malformed URL: {exc}")
-    if parsed.scheme.lower() not in ("http", "https"):
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
         fail("only HTTP and HTTPS URLs are supported")
     host = parsed.hostname
     if not host:
@@ -98,14 +113,39 @@ def check_url(url):
         fail("subscription URL cannot point to localhost or local network")
     if is_forbidden_ip(host_lower):
         fail("subscription URL cannot point to private, loopback, or cloud metadata IP addresses")
+    if _is_ip_literal(host_lower):
+        return ""
     try:
-        infos = socket.getaddrinfo(host, None)
+        port = parsed.port
+    except ValueError as exc:
+        fail(f"invalid URL port: {exc}")
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    resolved_ips = []
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         for info in infos:
-            ip_str = info[4][0]
+            ip_str = info[4][0].split("%", 1)[0]
             if is_forbidden_ip(ip_str):
                 fail(f"subscription URL resolves to forbidden address: {ip_str}")
-    except (socket.gaierror, OSError):
-        pass
+            formatted = f"[{ip_str}]" if ":" in ip_str else ip_str
+            if formatted not in resolved_ips:
+                resolved_ips.append(formatted)
+    except (socket.gaierror, OSError) as exc:
+        if not allow_unresolved:
+            fail(f"cannot resolve subscription host {host}: {exc}")
+        return ""
+    if not resolved_ips:
+        if not allow_unresolved:
+            fail(f"cannot resolve subscription host {host}")
+        return ""
+    return f"{host}:{port}:{','.join(resolved_ips)}"
+
+
+def resolve_redirect(base_url, location, allow_unresolved=True):
+    next_url = urllib.parse.urljoin(base_url, location.strip())
+    resolve_arg = check_url(next_url, allow_unresolved=allow_unresolved)
+    return next_url, resolve_arg
 
 
 def validate_value(value, path="proxy", depth=0):
@@ -267,12 +307,44 @@ def main():
             check_names(sys.argv[2], sys.argv[3])
         elif len(sys.argv) == 3 and sys.argv[1] == "check-filter":
             compile_filter(sys.argv[2])
-        elif len(sys.argv) == 3 and sys.argv[1] == "check-url":
-            check_url(sys.argv[2])
+        elif len(sys.argv) >= 3 and sys.argv[1] == "check-url":
+            args = sys.argv[2:]
+            allow_unresolved = True
+            print_resolve = False
+            url = None
+            for arg in args:
+                if arg == "--strict":
+                    allow_unresolved = False
+                elif arg == "--print-resolve":
+                    print_resolve = True
+                elif url is None:
+                    url = arg
+                else:
+                    fail("usage: extra_sub.py check-url [--strict] [--print-resolve] <url>")
+            if url is None:
+                fail("usage: extra_sub.py check-url [--strict] [--print-resolve] <url>")
+            resolved = check_url(url, allow_unresolved=allow_unresolved)
+            if print_resolve and resolved:
+                print(resolved)
+        elif len(sys.argv) >= 4 and sys.argv[1] == "resolve-redirect":
+            args = sys.argv[2:]
+            allow_unresolved = True
+            positional = []
+            for arg in args:
+                if arg == "--strict":
+                    allow_unresolved = False
+                else:
+                    positional.append(arg)
+            if len(positional) != 2:
+                fail("usage: extra_sub.py resolve-redirect [--strict] <base_url> <location>")
+            next_url, _ = resolve_redirect(positional[0], positional[1], allow_unresolved=allow_unresolved)
+            print(next_url)
         else:
             fail(
                 "usage: extra_sub.py normalize <input> <filter> <proxies> <names>"
-                " | check-names <names> <local> | check-filter <regex> | check-url <url>"
+                " | check-names <names> <local> | check-filter <regex>"
+                " | check-url [--strict] [--print-resolve] <url>"
+                " | resolve-redirect [--strict] <base_url> <location>"
             )
     except SubscriptionError as exc:
         print(f"Error: {exc}", file=sys.stderr)
