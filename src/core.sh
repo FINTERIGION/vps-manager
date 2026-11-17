@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.5.3"
+VPSM_VERSION="1.5.4"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -37,6 +37,8 @@ CERT_CHECK_INTERVAL=21600
 CERT_WARN_DAYS=15
 EXTRA_REFRESH_STAMP="$ROOT/.extra_refresh_stamp"
 EXTRA_REFRESH_MIN=${VPSM_EXTRA_REFRESH_MIN:-1800}
+EXTRA_ATTEMPT_STAMP="$ROOT/.extra_attempt_stamp"
+EXTRA_RETRY_MIN=${VPSM_EXTRA_RETRY_MIN:-300}
 EXTRA_UA=${VPSM_EXTRA_UA:-clash-verge/v2.0.0 mihomo/1.18.0}
 
 API_PORT=10085
@@ -44,6 +46,7 @@ API_ADDR="127.0.0.1:$API_PORT"
 CADDY_PORT=8443
 FV_PORT=8888
 FV_DIR="$ROOT/futures-view"
+FV_HOME="$ROOT/.fv-home"
 FV_SVC="vpsm-futures-view"
 FV_USER="vpsm-fv"
 FV_REPO="https://github.com/FINTERIGION/futures-view.git"

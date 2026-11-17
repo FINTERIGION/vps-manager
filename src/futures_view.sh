@@ -38,11 +38,44 @@ fv_fix_perms() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
     [[ -d $FV_DIR ]] || return 0
     fv_ensure_user
-    chown -R "$FV_USER:$FV_USER" "$FV_DIR"
-    if [[ -f $FV_DIR/.env ]]; then
+    chown "$FV_USER:$FV_USER" "$FV_DIR"
+    find "$FV_DIR" -mindepth 1 -maxdepth 1 ! -name '.env' -exec chown -hR "$FV_USER:$FV_USER" {} + 2>/dev/null || true
+    if [[ -f $FV_DIR/.env && ! -L $FV_DIR/.env ]]; then
         chown root:root "$FV_DIR/.env"
         chmod 600 "$FV_DIR/.env"
     fi
+}
+
+fv_run_in() {
+    local dir=$1
+    shift
+    if [[ -n ${VPSM_NO_SERVICE:-} ]]; then
+        (cd "$dir" && "$@")
+        return
+    fi
+    fv_ensure_user
+    mkdir -p "$FV_HOME"
+    chown "$FV_USER:$FV_USER" "$FV_HOME"
+    chmod 700 "$FV_HOME"
+    local path_env="/usr/local/bin:/usr/bin:/bin"
+    [[ -d $ROOT/node/bin ]] && path_env="$ROOT/node/bin:$path_env"
+    (
+        cd "$dir" || return 1
+        runuser -u "$FV_USER" -- env -i \
+            HOME="$FV_HOME" \
+            LANG=C.UTF-8 \
+            LC_ALL=C.UTF-8 \
+            PATH="$path_env" \
+            npm_config_cache="$FV_HOME/.npm" \
+            PIP_CACHE_DIR="$FV_HOME/.cache/pip" \
+            "$@"
+    )
+}
+
+fv_run() {
+    local dir=$ROOT
+    [[ -d $FV_DIR ]] && dir=$FV_DIR
+    fv_run_in "$dir" "$@"
 }
 
 fv_webui_url() {
@@ -58,21 +91,20 @@ fv_webui_url() {
 
 fv_sync_static_assets() {
     mkdir -p "$WWW_DIR"
-    if [[ -d $FV_DIR/web/static ]] && [[ -n $(find "$FV_DIR/web/static" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
+    if [[ -d $FV_DIR/web/static && ! -L $FV_DIR/web/static ]] &&
+        [[ -n $(find "$FV_DIR/web/static" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
         find "$WWW_DIR" -mindepth 1 -delete 2>/dev/null || rm -rf "${WWW_DIR:?}"/*
-        cp -r "$FV_DIR/web/static/"* "$WWW_DIR/"
+        cp -rP --no-preserve=ownership "$FV_DIR/web/static/." "$WWW_DIR/"
+        find "$WWW_DIR" -type l -delete 2>/dev/null || true
         find "$WWW_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
         find "$WWW_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
     fi
 }
 
 fv_apply_password() {
-    local pass=$1 py
-    py="$FV_DIR/.venv/bin/python"
+    local pass=$1 py="$FV_DIR/.venv/bin/python"
     [[ -x $py ]] || return 1
-    (
-        cd "$FV_DIR" && FV_NEW_PASS="$pass" "$py" -c "import os; from web.auth import set_password; set_password(os.environ['FV_NEW_PASS'])"
-    ) || return 1
+    printf '%s' "$pass" | fv_run "$py" -c "import sys; from web.auth import set_password; set_password(sys.stdin.read())" || return 1
     fv_fix_perms
     db_write --arg p "$pass" '.settings.futures_view.password = $p'
 }
@@ -110,7 +142,7 @@ fv_sync_env_file() {
         [[ -n $key || -n $secret ]] || return 0
         mkdir -p "$FV_DIR"
     fi
-    if [[ -f $env_file ]]; then
+    if [[ -f $env_file && ! -L $env_file ]]; then
         tmp=$(grep -v -E '^(DCE_API_KEY|DCE_KEY|FT_DCE_API_KEY|DCE_SECRET|DCE_API_SECRET|FT_DCE_SECRET)=' "$env_file" 2>/dev/null || true)
     fi
     if [[ -n $key || -n $secret ]]; then
@@ -131,12 +163,14 @@ fv_sync_env_file() {
             fi
         } > "$out_tmp"
         chmod 600 "$out_tmp" 2>/dev/null || true
+        [[ -z ${VPSM_NO_SERVICE:-} ]] && chown root:root "$out_tmp" 2>/dev/null || true
         mv -f "$out_tmp" "$env_file"
     else
         if [[ -n $tmp ]]; then
             out_tmp=$(umask 077; mktemp "$FV_DIR/.env.XXXXXX") || return 1
             printf '%s\n' "$tmp" > "$out_tmp"
             chmod 600 "$out_tmp" 2>/dev/null || true
+            [[ -z ${VPSM_NO_SERVICE:-} ]] && chown root:root "$out_tmp" 2>/dev/null || true
             mv -f "$out_tmp" "$env_file"
         else
             rm -f "$env_file"
@@ -189,8 +223,8 @@ fv_status() {
     dce_s=$(fv_get_dce_secret)
     echo "=== FuturesView Panel Status ==="
     echo "Enabled:       $(fv_enabled && echo "yes" || echo "no")"
-    echo "Repository:    $FV_DIR $([[ -d $FV_DIR/.git ]] && echo "(git $(git -c safe.directory="$FV_DIR" -C "$FV_DIR" rev-parse --short HEAD 2>/dev/null || echo "cloned"))" || echo "(not cloned)")"
-    echo "Virtualenv:    $([[ -x $FV_DIR/.venv/bin/python ]] && echo "installed ($("$FV_DIR/.venv/bin/python" --version 2>/dev/null))" || echo "missing")"
+    echo "Repository:    $FV_DIR $([[ -d $FV_DIR/.git ]] && echo "(git $(fv_run git -C "$FV_DIR" rev-parse --short HEAD 2>/dev/null || echo "cloned"))" || echo "(not cloned)")"
+    echo "Virtualenv:    $([[ -x $FV_DIR/.venv/bin/python ]] && echo "installed ($(fv_run "$FV_DIR/.venv/bin/python" --version 2>/dev/null))" || echo "missing")"
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         state=$(systemctl is-active "$FV_SVC" 2>/dev/null || echo "unknown")
         if [[ $state == active ]]; then
@@ -261,10 +295,12 @@ fv_install_node22() {
     fi
     rm -rf "$ROOT/node.new"
     mkdir -p "$ROOT/node.new"
+    chmod 755 "$ROOT/node.new"
     if ! tar -xzf "$tmp/node.tgz" -C "$ROOT/node.new" --strip-components=1; then
         rm -rf "$tmp" "$ROOT/node.new"
         return 1
     fi
+    chmod 755 "$ROOT/node.new"
     rm -rf "$tmp" "$ROOT/node"
     mv -f "$ROOT/node.new" "$ROOT/node"
     export PATH="$ROOT/node/bin:$PATH"
@@ -273,7 +309,7 @@ fv_install_node22() {
 fv_check_prereqs() {
     [[ -d $ROOT/node/bin ]] && export PATH="$ROOT/node/bin:$PATH"
     local missing=() p
-    for p in git python3 curl; do
+    for p in git python3 curl runuser; do
         command -v "$p" >/dev/null 2>&1 || missing+=("$p")
     done
     if ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
@@ -324,22 +360,42 @@ fv_deploy() {
 
     mkdir -p "${FV_DIR%/*}"
     if [[ ! -d $FV_DIR/.git ]]; then
+        local saved_env=""
+        if [[ -f $FV_DIR/.env && ! -L $FV_DIR/.env ]]; then
+            saved_env=$(umask 077; mktemp "$ROOT/.fv.env.XXXXXX") || err "Failed to back up FuturesView .env"
+            cp -p "$FV_DIR/.env" "$saved_env"
+            rm -f "$FV_DIR/.env"
+        fi
+        mkdir -p "$FV_DIR"
+        fv_fix_perms
         msg "Cloning $FV_REPO into $FV_DIR ..."
-        git clone "$FV_REPO" "$FV_DIR" || err "Failed to clone $FV_REPO"
+        if ! fv_run git clone "$FV_REPO" "$FV_DIR"; then
+            if [[ -n $saved_env ]]; then
+                mkdir -p "$FV_DIR"
+                mv -f "$saved_env" "$FV_DIR/.env"
+                fv_fix_perms
+            fi
+            err "Failed to clone $FV_REPO"
+        fi
+        if [[ -n $saved_env ]]; then
+            mv -f "$saved_env" "$FV_DIR/.env"
+            fv_fix_perms
+        fi
     else
+        fv_fix_perms
         msg "Repository already exists in $FV_DIR, updating..."
-        git -c safe.directory="$FV_DIR" -C "$FV_DIR" pull --ff-only 2>/dev/null || warn "git pull failed, using current checkout"
+        fv_run git -C "$FV_DIR" pull --ff-only 2>/dev/null || warn "git pull failed, using current checkout"
     fi
 
     if [[ ! -x $FV_DIR/.venv/bin/python || ! -x $FV_DIR/.venv/bin/pip ]]; then
         msg "Creating Python virtual environment in $FV_DIR/.venv ..."
         rm -rf "$FV_DIR/.venv"
-        python3 -m venv "$FV_DIR/.venv" || err "Failed to create Python virtualenv"
+        fv_run python3 -m venv "$FV_DIR/.venv" || err "Failed to create Python virtualenv"
     fi
 
     msg "Installing FuturesView dependencies with pip ..."
-    "$FV_DIR/.venv/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
-    if ! "$FV_DIR/.venv/bin/pip" install -e "${FV_DIR}[web]"; then
+    fv_run "$FV_DIR/.venv/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
+    if ! fv_run "$FV_DIR/.venv/bin/pip" install -e "${FV_DIR}[web]"; then
         err "Failed to install Python dependencies for FuturesView"
     fi
 
@@ -352,11 +408,8 @@ fv_deploy() {
 
     msg "Building frontend assets in $FV_DIR/webui ..."
     if [[ -d $FV_DIR/webui ]]; then
-        (
-            cd "$FV_DIR/webui"
-            npm ci || npm install || { err "npm install failed in $FV_DIR/webui"; }
-            npm run build || { err "npm run build failed in $FV_DIR/webui"; }
-        ) || return 1
+        fv_run_in "$FV_DIR/webui" npm ci || fv_run_in "$FV_DIR/webui" npm install || err "npm install failed in $FV_DIR/webui"
+        fv_run_in "$FV_DIR/webui" npm run build || err "npm run build failed in $FV_DIR/webui"
     else
         err "Directory $FV_DIR/webui not found"
     fi
@@ -409,25 +462,23 @@ fv_update() {
 
     echo "=== Updating FuturesView ==="
     fv_check_prereqs
+    fv_fix_perms
     msg "Pulling latest code from git ..."
     local branch
-    branch=$(git -c safe.directory="$FV_DIR" -C "$FV_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-    if ! git -c safe.directory="$FV_DIR" -C "$FV_DIR" pull --ff-only origin "$branch"; then
+    branch=$(fv_run git -C "$FV_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    if ! fv_run git -C "$FV_DIR" pull --ff-only origin "$branch"; then
         err "Failed to git pull in $FV_DIR"
     fi
 
     msg "Updating Python dependencies ..."
     if [[ -x $FV_DIR/.venv/bin/pip ]]; then
-        "$FV_DIR/.venv/bin/pip" install -e "${FV_DIR}[web]" || warn "pip install encountered issues"
+        fv_run "$FV_DIR/.venv/bin/pip" install -e "${FV_DIR}[web]" || warn "pip install encountered issues"
     fi
 
     msg "Rebuilding frontend assets ..."
     if [[ -d $FV_DIR/webui ]]; then
-        (
-            cd "$FV_DIR/webui"
-            npm ci || npm install || { err "npm install failed"; }
-            npm run build || { err "npm run build failed"; }
-        ) || return 1
+        fv_run_in "$FV_DIR/webui" npm ci || fv_run_in "$FV_DIR/webui" npm install || err "npm install failed"
+        fv_run_in "$FV_DIR/webui" npm run build || err "npm run build failed"
     fi
 
     msg "Syncing built static assets to web root ..."
@@ -450,8 +501,17 @@ fv_update() {
 fv_set_password_cmd() {
     need_root
     need_installed
-    local new_p=$1
-    if [[ -z $new_p ]]; then
+    local new_p=${1:-}
+    if [[ $new_p == - ]]; then
+        if [[ -t 0 ]]; then
+            read -r -s -p "New password (8-256 characters): " new_p || { echo; return 0; }
+            echo
+        else
+            read -r new_p || return 0
+        fi
+    elif [[ -n $new_p ]]; then
+        warn "Passing passwords directly as CLI arguments may expose them in process lists and shell history. Prefer interactive 'vpsm fv password' or '-' via stdin."
+    else
         local curr choice
         curr=$(fv_get_password)
         echo "Current WebUI password: ${curr:-"(none / not set)"}"
@@ -629,15 +689,47 @@ fv_set_dce_credentials_cmd() {
                 key=""
                 secret=""
                 ;;
+            -)
+                if [[ -t 0 ]]; then
+                    read -r -s -p "Enter DCE API Key: " key || { echo; return 0; }
+                    echo
+                    read -r -s -p "Enter DCE Secret: " secret || { echo; return 0; }
+                    echo
+                else
+                    read -r key || true
+                    read -r secret || true
+                fi
+                ;;
             key | apikey)
-                key=$arg2
+                if [[ $arg2 == - ]]; then
+                    if [[ -t 0 ]]; then
+                        read -r -s -p "Enter DCE API Key: " key || { echo; return 0; }
+                        echo
+                    else
+                        read -r key || true
+                    fi
+                else
+                    [[ -n $arg2 ]] && warn "Passing API credentials directly as CLI arguments may expose them in process lists and shell history. Prefer interactive 'vpsm fv apikey' or '-' via stdin."
+                    key=$arg2
+                fi
                 secret="$curr_s"
                 ;;
             secret | sec)
                 key="$curr_k"
-                secret=$arg2
+                if [[ $arg2 == - ]]; then
+                    if [[ -t 0 ]]; then
+                        read -r -s -p "Enter DCE Secret: " secret || { echo; return 0; }
+                        echo
+                    else
+                        read -r secret || true
+                    fi
+                else
+                    [[ -n $arg2 ]] && warn "Passing API credentials directly as CLI arguments may expose them in process lists and shell history. Prefer interactive 'vpsm fv apikey' or '-' via stdin."
+                    secret=$arg2
+                fi
                 ;;
             *)
+                warn "Passing API credentials directly as CLI arguments may expose them in process lists and shell history. Prefer interactive 'vpsm fv apikey' or '-' via stdin."
                 key=$arg1
                 if (($# >= 2)); then
                     secret=$arg2
@@ -700,7 +792,7 @@ fv_remove() {
     if [[ -d $FV_DIR ]]; then
         ans=$(ask "Delete the FuturesView directory ($FV_DIR)? [y/N]: ") || return 0
         if [[ ${ans,,} == y ]]; then
-            rm -rf "$FV_DIR"
+            rm -rf "$FV_DIR" "$FV_HOME"
             ok "Deleted $FV_DIR"
         fi
     fi

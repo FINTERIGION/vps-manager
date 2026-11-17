@@ -255,10 +255,15 @@ update_sh() {
     find "$new" -type f -exec chmod 644 {} + 2>/dev/null || true
     chmod 755 "$new/vpsm.sh" "$new"/src/*.sh 2>/dev/null || true
     chmod 755 "$new"/src/*.py 2>/dev/null || true
+    local db_snap=""
+    if [[ -f $DB ]]; then
+        db_snap=$(db_snapshot) || { rm -rf "$new"; err "Failed to back up the database"; }
+    fi
     rm -rf "$tmp" "$ROOT/sh.old"
-    mv "$ROOT/sh" "$ROOT/sh.old" || { rm -rf "$new"; err "Failed to replace scripts"; }
+    mv "$ROOT/sh" "$ROOT/sh.old" || { rm -f "$db_snap"; rm -rf "$new"; err "Failed to replace scripts"; }
     if ! mv "$new" "$ROOT/sh"; then
         mv "$ROOT/sh.old" "$ROOT/sh"
+        rm -f "$db_snap"
         rm -rf "$new"
         err "Failed to replace scripts, previous version restored"
     fi
@@ -266,15 +271,20 @@ update_sh() {
     restart_changed_units
     if VPSM_LOCK_HELD=1 "$ROOT/sh/vpsm.sh" regen; then
         [[ -n $arg ]] && echo "$repo $ref" >"$ROOT/repo"
+        rm -f "$db_snap"
         rm -rf "$ROOT/sh.old"
         ver=$("$ROOT/sh/vpsm.sh" version)
         ok "Scripts updated to $ver"
     else
         warn "Failed to regenerate configs with the new scripts, restoring previous version"
+        if [[ -n $db_snap && -f $db_snap ]]; then
+            db_restore "$db_snap" || warn "Failed to restore the database"
+        fi
         rm -rf "$ROOT/sh"
         mv "$ROOT/sh.old" "$ROOT/sh" || err "Failed to restore previous scripts"
         install_units
         restart_changed_units
+        VPSM_LOCK_HELD=1 "$ROOT/sh/vpsm.sh" regen >/dev/null 2>&1 || warn "Failed to regenerate configs with restored scripts"
         warn "Previous scripts and units restored. Retry with: vpsm update sh"
         return 1
     fi
@@ -401,8 +411,9 @@ Subscriptions:
   filter <alias> <regex|0>          Filter a subscription's nodes by a regular expression
 
 Node:
-  node [name|0]                     Show or set the local proxy name
-  node port|domain|key|shortid      Configure the listener and Reality parameters
+  node                              Show node information
+  node name [name|0]                Show or set the local proxy name (or: vpsm name [name|0])
+  node port|domain|key|shortid|udp  Configure the listener, Reality parameters, and UDP forwarding
   rules                             Edit custom Clash rules
   regen                             Regenerate all configs and subscriptions
 

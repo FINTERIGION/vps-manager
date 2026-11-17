@@ -366,7 +366,7 @@ node_cmd() {
         name) shift; set_node_name "$*" ;;
         udp) shift; set_udp "$@" ;;
         "") show_node_info ;;
-        *) set_node_name "$*" ;;
+        *) err "Usage: vpsm node [name|port|domain|key|shortid|udp]" ;;
     esac
 }
 

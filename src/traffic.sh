@@ -125,10 +125,23 @@ apply_state() {
     return 0
 }
 
+extra_sub_path_ensure() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    systemctl is-enabled --quiet vpsm-extra-sub.path 2>/dev/null || return 0
+    if systemctl is-failed --quiet vpsm-extra-sub.path 2>/dev/null; then
+        warn "vpsm-extra-sub.path entered failed state, resetting and restarting"
+        systemctl reset-failed vpsm-extra-sub.path 2>/dev/null || true
+        systemctl restart vpsm-extra-sub.path 2>/dev/null || true
+    elif ! systemctl is-active --quiet vpsm-extra-sub.path 2>/dev/null; then
+        systemctl start vpsm-extra-sub.path 2>/dev/null || true
+    fi
+}
+
 sync_all() {
     local snap
     fw_guard_ensure
     fw_ports_ensure
+    extra_sub_path_ensure
     if caddy_stale; then
         warn "Caddyfile does not match the current domain/port, regenerating"
         caddy_gen

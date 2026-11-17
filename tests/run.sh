@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # vpsm - isolated functional tests; never modify host security or service state
+# shellcheck disable=SC2329
 set -o pipefail
 
 PROJECT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -791,19 +792,25 @@ else
 fi
 assert_file_not_contains "$CURL_REDIR_LOG" "127.0.0.1:10085" "curl never requests forbidden redirect destination"
 
-# 2. Failed async external refresh does not lock out immediate retry
-rm -f "$EXTRA_REFRESH_STAMP"
+# 2. Failed async external refresh backs off briefly without extending success cooldown
+rm -f "$EXTRA_REFRESH_STAMP" "$EXTRA_ATTEMPT_STAMP"
 db_write '.settings.extra_subs = [{alias:"retrytest",url:"https://subscriptions.example/clash.yaml",filter:""}]'
 CURL_STUB_FAIL=1 extra_sub_async_refresh >/dev/null 2>&1
-[[ ! -e $EXTRA_REFRESH_STAMP ]] &&
-    ok_test "failed async external refresh does not write cooldown stamp" ||
-    fail_test "failed async external refresh does not write cooldown stamp"
+[[ ! -e $EXTRA_REFRESH_STAMP && -f $EXTRA_ATTEMPT_STAMP ]] &&
+    ok_test "failed async external refresh writes failure backoff stamp without success cooldown" ||
+    fail_test "failed async external refresh writes failure backoff stamp without success cooldown"
+: >"$CURL_ARGS_LOG"
+extra_sub_async_refresh >/dev/null 2>&1
+[[ ! -s $CURL_ARGS_LOG && ! -e $SUB_EXTRA/retrytest.proxies.yaml ]] &&
+    ok_test "async external refresh skips repeated retries inside failure backoff window" ||
+    fail_test "async external refresh skips repeated retries inside failure backoff window"
+touch -d '10 minutes ago' "$EXTRA_ATTEMPT_STAMP"
 extra_sub_async_refresh >/dev/null 2>&1
 [[ -f $EXTRA_REFRESH_STAMP && -f $SUB_EXTRA/retrytest.proxies.yaml ]] &&
-    ok_test "async external refresh recovers immediately on next attempt after failure" ||
-    fail_test "async external refresh recovers immediately on next attempt after failure"
+    ok_test "async external refresh recovers on next attempt after backoff window expires" ||
+    fail_test "async external refresh recovers on next attempt after backoff window expires"
 db_write '.settings.extra_subs = []'
-rm -f "$SUB_EXTRA/retrytest".* "$EXTRA_REFRESH_STAMP"
+rm -f "$SUB_EXTRA/retrytest".* "$EXTRA_REFRESH_STAMP" "$EXTRA_ATTEMPT_STAMP"
 sub_regen force >/dev/null 2>&1
 
 # 3. FuturesView non-root hardening, non-443 Host/Origin allowlist, and static cleanup
@@ -872,6 +879,250 @@ sub_menu_out=$(printf '8\nno_such_user\n\n0\n' | bash "$PROJECT/vpsm.sh" 2>&1)
 [[ $sub_menu_out == *"does not exist"* && $sub_menu_out != *"Clash subscription:"* ]] &&
     ok_test "subscription_menu rejects missing user without printing empty URLs" ||
     fail_test "subscription_menu rejects missing user without printing empty URLs"
+
+# 8. set_port rolls back database and configs cleanly on generation failure
+old_port=$(db_get '.settings.port')
+if (
+    xray_gen_config() { return 1; }
+    set_port 8445
+) >/dev/null 2>&1; then
+    fail_test "set_port fails when xray_gen_config fails"
+else
+    ok_test "set_port fails when xray_gen_config fails"
+fi
+assert_eq "$old_port" "$(db_get '.settings.port')" "failed set_port preserves previous port in database"
+if (
+    caddy_gen() { return 1; }
+    set_port 8445
+) >/dev/null 2>&1; then
+    fail_test "set_port fails when caddy_gen fails"
+else
+    ok_test "set_port fails when caddy_gen fails"
+fi
+assert_eq "$old_port" "$(db_get '.settings.port')" "set_port restores port when caddy_gen fails"
+assert_file_contains "$XRAY_CONF" "\"port\": $old_port" "set_port restores Xray config port on rollback"
+
+# 9. Docker firewall protection filters ingress without blocking container egress
+fw_apply_out=$(fw_apply)
+[[ $fw_apply_out == *":VPSM-DOCKER "* &&
+    $fw_apply_out == *":VPSM-DOCKER-IN "* &&
+    $fw_apply_out == *"-A VPSM-DOCKER -i docker0 -j RETURN"* &&
+    $fw_apply_out == *"-A VPSM-DOCKER -i br-+ -j RETURN"* &&
+    $fw_apply_out == *"-A VPSM-DOCKER -o docker0 -j VPSM-DOCKER-IN"* &&
+    $fw_apply_out == *"-p tcp -m conntrack --ctorigdstport 443 -j RETURN"* &&
+    $fw_apply_out == *"-A VPSM-DOCKER-IN -j DROP"* ]] &&
+    ok_test "fw_apply generates dedicated VPSM-DOCKER rules allowing egress and filtering ingress" ||
+    fail_test "fw_apply generates dedicated VPSM-DOCKER rules allowing egress and filtering ingress"
+[[ $fw_apply_out != *"DOCKER-USER -j VPSM-IN"* ]] &&
+    ok_test "fw_apply does not attach VPSM-IN directly to DOCKER-USER" ||
+    fail_test "fw_apply does not attach VPSM-IN directly to DOCKER-USER"
+
+mkdir -p "$TMP/fw-bin"
+cat >"$TMP/fw-bin/iptables" <<'EOF'
+#!/usr/bin/env bash
+printf 'iptables %s\n' "$*" >>"$FW_STUB_LOG"
+case " $* " in
+    *" -L DOCKER-USER "*) exit 0 ;;
+    *" -C INPUT -j VPSM-IN "*) exit 0 ;;
+    *" -C DOCKER-USER -j VPSM-IN "*) [[ -f $FW_LEGACY_HOOK ]] && exit 0 || exit 1 ;;
+    *" -D DOCKER-USER -j VPSM-IN "*)
+        if [[ -f $FW_LEGACY_HOOK ]]; then
+            rm -f "$FW_LEGACY_HOOK"
+            exit 0
+        fi
+        exit 1
+        ;;
+    *" -C DOCKER-USER -j VPSM-DOCKER "*) [[ -f $FW_DOCKER_HOOK ]] && exit 0 || exit 1 ;;
+    *" -I DOCKER-USER 1 -j VPSM-DOCKER "*) : >"$FW_DOCKER_HOOK"; exit 0 ;;
+    *" -D "*) exit 1 ;;
+    *) exit 0 ;;
+esac
+EOF
+cat >"$TMP/fw-bin/iptables-restore" <<'EOF'
+#!/usr/bin/env bash
+printf 'iptables-restore %s\n' "$*" >>"$FW_STUB_LOG"
+cat >>"$FW_RESTORE_LOG"
+EOF
+cat >"$TMP/fw-bin/ip6tables" <<'EOF'
+#!/usr/bin/env bash
+printf 'ip6tables %s\n' "$*" >>"$FW_STUB_LOG"
+case " $* " in
+    *" -L DOCKER-USER "*) exit 1 ;;
+    *" -D "*) exit 1 ;;
+    *) exit 0 ;;
+esac
+EOF
+cat >"$TMP/fw-bin/ip6tables-restore" <<'EOF'
+#!/usr/bin/env bash
+printf 'ip6tables-restore %s\n' "$*" >>"$FW_STUB_LOG"
+cat >/dev/null
+EOF
+chmod 755 "$TMP/fw-bin/"*
+export FW_STUB_LOG="$TMP/fw-stub.log"
+export FW_RESTORE_LOG="$TMP/fw-restore.log"
+export FW_LEGACY_HOOK="$TMP/fw-legacy-hook"
+export FW_DOCKER_HOOK="$TMP/fw-docker-hook"
+: >"$FW_STUB_LOG"
+: >"$FW_RESTORE_LOG"
+: >"$FW_LEGACY_HOOK"
+fw_allowed | cut -f1 >"$FW_STAMP"
+db_write '.settings.firewall.enabled = true'
+(
+    unset VPSM_NO_SERVICE
+    PATH="$TMP/fw-bin:$PATH"
+    fw_ports_ensure >/dev/null 2>&1
+)
+db_write '.settings.firewall.enabled = false'
+assert_file_contains "$FW_STUB_LOG" "-D DOCKER-USER -j VPSM-IN" "fw_ports_ensure migrates away from legacy DOCKER-USER VPSM-IN hook"
+assert_file_contains "$FW_STUB_LOG" "-I DOCKER-USER 1 -j VPSM-DOCKER" "fw_ports_ensure installs dedicated VPSM-DOCKER hook"
+assert_file_contains "$FW_RESTORE_LOG" ":VPSM-DOCKER - [0:0]" "fw_ports_ensure loads VPSM-DOCKER chains"
+
+# 10. vpsm-extra-sub.path omits TriggerLimit and async refresh detects config race
+assert_file_not_contains "$PROJECT/systemd/vpsm-extra-sub.path" "TriggerLimit" \
+    "vpsm-extra-sub.path omits TriggerLimit to avoid permanent failure"
+mkdir -p "$TMP/race-bin"
+cat >"$TMP/race-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+out=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -o) out=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+cp "$FIXTURE" "$out"
+# Simulate an administrator changing the filter while async fetch is in flight
+tmpdb=$(mktemp "$DB.race.XXXXXX")
+jq '.settings.extra_subs |= map(if .alias == "racetest" then .filter = "^Quote$" else . end)' "$DB" >"$tmpdb" && mv -f "$tmpdb" "$DB"
+EOF
+chmod 755 "$TMP/race-bin/curl"
+rm -f "$EXTRA_REFRESH_STAMP" "$EXTRA_ATTEMPT_STAMP" "$SUB_EXTRA/racetest".*
+db_write '.settings.extra_subs = [{alias:"racetest",url:"https://subscriptions.example/clash.yaml",filter:"^Tokyo$"}]'
+(
+    PATH="$TMP/race-bin:$PATH"
+    extra_sub_async_refresh force >/dev/null 2>&1
+)
+[[ ! -e $SUB_EXTRA/racetest.proxies.yaml ]] &&
+    ok_test "async refresh discards stale cache when filter changes mid-flight" ||
+    fail_test "async refresh discards stale cache when filter changes mid-flight"
+db_write '.settings.extra_subs = []'
+rm -f "$SUB_EXTRA/racetest".* "$EXTRA_REFRESH_STAMP" "$EXTRA_ATTEMPT_STAMP"
+sub_regen force >/dev/null 2>&1
+
+# 11. update_sh restores database snapshot when post-update regen fails
+mkdir -p "$TMP/upd-root/sh" "$TMP/upd-pkg/vpsm-new/src" "$TMP/upd-pkg/vpsm-new/templates" "$TMP/upd-pkg/vpsm-new/systemd"
+cp "$PROJECT/vpsm.sh" "$TMP/upd-root/sh/"
+cp -r "$PROJECT/src" "$PROJECT/templates" "$PROJECT/systemd" "$TMP/upd-root/sh/"
+printf 'owner/repo main\n' >"$TMP/upd-root/repo"
+jq -n '{settings:{domain:"upd.example.com",port:443,private_key:"priv",public_key:"pub",short_ids:["abcd1234"],reset_day:1,last_reset:"2026-01",expire:"",extra_subs:[],sentinel:"keep-me"},users:[]}' >"$TMP/upd-root/users.json"
+cat >"$TMP/upd-pkg/vpsm-new/vpsm.sh" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${1:-} == regen ]]; then
+    db="${VPSM_ROOT}/users.json"
+    tmp=$(mktemp "${db}.XXXXXX")
+    jq '.settings.sentinel = "mutated"' "$db" >"$tmp" && mv -f "$tmp" "$db"
+    exit 1
+fi
+exit 0
+EOF
+printf '#!/usr/bin/env bash\n# stub\n' >"$TMP/upd-pkg/vpsm-new/install.sh"
+printf '#!/usr/bin/env bash\n# stub\n' >"$TMP/upd-pkg/vpsm-new/src/core.sh"
+chmod 755 "$TMP/upd-pkg/vpsm-new/vpsm.sh"
+tar -czf "$TMP/upd.tgz" -C "$TMP/upd-pkg" vpsm-new
+if (
+    export VPSM_ROOT="$TMP/upd-root"
+    . "$TMP/upd-root/sh/src/core.sh"
+    for _l in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
+        # shellcheck disable=SC1090
+        . "$SH_DIR/src/$_l.sh"
+    done
+    dl() { cp "$TMP/upd.tgz" "$2"; }
+    update_sh
+) >/dev/null 2>&1; then
+    fail_test "update_sh returns failure when post-update regen fails"
+else
+    ok_test "update_sh returns failure when post-update regen fails"
+fi
+assert_eq "keep-me" "$(jq -r '.settings.sentinel' "$TMP/upd-root/users.json")" \
+    "update_sh restores database snapshot when rolling back failed update"
+assert_file_contains "$TMP/upd-root/sh/vpsm.sh" "node_cmd" \
+    "update_sh restores previous scripts on rollback"
+
+# 12. vpsm node rejects unknown subcommands instead of silently renaming node
+node_bad_out=$(bash "$PROJECT/vpsm.sh" node prot 8443 2>&1) && rc=0 || rc=$?
+((rc != 0)) && [[ $node_bad_out == *"Usage: vpsm node"* ]] &&
+    ok_test "vpsm node rejects unknown subcommands with usage error" ||
+    fail_test "vpsm node rejects unknown subcommands with usage error"
+assert_eq "node.example.com" "$(node_name)" "rejected vpsm node typo leaves node name unchanged"
+
+# 13. FuturesView privilege drop, symlink protection, and secret handling
+mkdir -p "$FV_DIR/web/static" "$WWW_DIR"
+printf 'ok\n' >"$FV_DIR/web/static/index.html"
+ln -sf "$DB" "$FV_DIR/web/static/leak.json"
+fv_sync_static_assets
+[[ -f $WWW_DIR/index.html && ! -e $WWW_DIR/leak.json ]] &&
+    ok_test "fv_sync_static_assets ignores symlinks into sensitive files" ||
+    fail_test "fv_sync_static_assets ignores symlinks into sensitive files"
+rm -rf "$FV_DIR"
+
+mkdir -p "$FV_DIR/.venv/bin" "$TMP/fv-bin"
+cat >"$TMP/fv-bin/runuser" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FV_RUNUSER_LOG"
+while [[ $# -gt 0 && $1 != "--" ]]; do shift; done
+[[ $1 == "--" ]] && shift
+if [[ $1 == env ]]; then
+    shift
+    while [[ $# -gt 0 && ($1 == -* || $1 == *=*) ]]; do shift; done
+fi
+"$@"
+EOF
+cat >"$TMP/fv-bin/chown" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$TMP/fv-bin/getent" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$FV_DIR/.venv/bin/python" <<'EOF'
+#!/usr/bin/env bash
+cat >"$FV_PY_STDIN"
+EOF
+chmod 755 "$TMP/fv-bin/"* "$FV_DIR/.venv/bin/python"
+export FV_RUNUSER_LOG="$TMP/fv-runuser.log"
+export FV_PY_STDIN="$TMP/fv-py-stdin.txt"
+: >"$FV_RUNUSER_LOG"
+: >"$FV_PY_STDIN"
+(
+    unset VPSM_NO_SERVICE
+    PATH="$TMP/fv-bin:$PATH"
+    fv_apply_password "SuperSecretPass99"
+) >/dev/null 2>&1
+assert_file_contains "$FV_RUNUSER_LOG" "-u vpsm-fv -- env -i" "fv_apply_password runs Python unprivileged via runuser"
+assert_file_not_contains "$FV_RUNUSER_LOG" "SuperSecretPass99" "fv_apply_password never passes password in command arguments"
+assert_eq "SuperSecretPass99" "$(cat "$FV_PY_STDIN")" "fv_apply_password delivers password over stdin"
+assert_eq "SuperSecretPass99" "$(fv_get_password)" "fv_apply_password updates database on success"
+rm -rf "$FV_DIR" "$FV_HOME"
+
+dce_warn_out=$(fv_set_dce_credentials_cmd "arg-key-123456" "arg-secret-123456" 2>&1 >/dev/null)
+[[ $dce_warn_out == *"process lists and shell history"* ]] &&
+    ok_test "fv_set_dce_credentials_cmd warns when credentials are passed as CLI args" ||
+    fail_test "fv_set_dce_credentials_cmd warns when credentials are passed as CLI args"
+dce_stdin_warn=$(printf 'stdin-key-123456\nstdin-sec-123456\n' | fv_set_dce_credentials_cmd - 2>&1 >/dev/null)
+[[ $dce_stdin_warn != *"process lists and shell history"* ]] &&
+    ok_test "fv_set_dce_credentials_cmd reads credentials cleanly via '-' stdin" ||
+    fail_test "fv_set_dce_credentials_cmd reads credentials cleanly via '-' stdin"
+assert_eq "stdin-key-123456" "$(fv_get_dce_api_key)" "fv_set_dce_credentials_cmd '-' stores API key"
+assert_eq "stdin-sec-123456" "$(fv_get_dce_secret)" "fv_set_dce_credentials_cmd '-' stores secret"
+fv_set_dce_credentials_cmd clear >/dev/null 2>&1
+
+pwd_stdin_warn=$(printf 'PassViaStdin123\n' | fv_set_password_cmd - 2>&1 >/dev/null)
+[[ $pwd_stdin_warn != *"process lists and shell history"* ]] &&
+    ok_test "fv_set_password_cmd reads password cleanly via '-' stdin" ||
+    fail_test "fv_set_password_cmd reads password cleanly via '-' stdin"
+assert_eq "PassViaStdin123" "$(fv_get_password)" "fv_set_password_cmd '-' stores password"
+db_write '.settings.futures_view.password = ""'
 
 printf '\n%d tests passed, %d failed\n' "$PASS" "$FAIL"
 ((FAIL == 0))

@@ -286,34 +286,29 @@ set_port() {
         return 0
     fi
     [[ -z ${VPSM_NO_SERVICE:-} ]] && port_in_use "$1" && err "Port $1 is already in use by another program"
-    local old new=$1
-    old=$(db_get '.settings.port')
+    local new=$1 db_snap
+    db_snap=$(db_snapshot) || err "Failed to back up the database"
     db_write --argjson p "$new" '.settings.port = $p'
-    xray_gen_config
-    caddy_gen
-    sub_regen force
-    if xray_active; then
-        if ! xray_restart force || ! svc_settled "$XRAY_SVC"; then
-            db_write --argjson p "$old" '.settings.port = $p'
-            xray_gen_config
-            caddy_gen
-            sub_regen force
-            xray_restart force
-            err "Xray failed to listen on port $new, listen port not changed"
-        fi
+    if ! ( xray_gen_config && caddy_gen && sub_regen force ); then
+        db_restore "$db_snap" || warn "Failed to restore the database"
+        db_rollback_runtime
+        err "Failed to generate configuration for port $new; listen port was not changed"
+    fi
+    if xray_active && { ! xray_restart force || ! svc_settled "$XRAY_SVC"; }; then
+        db_restore "$db_snap" || warn "Failed to restore the database"
+        db_rollback_runtime
+        err "Xray failed to listen on port $new, listen port not changed"
     fi
     if fw_enabled && ! fw_apply; then
-        db_write --argjson p "$old" '.settings.port = $p'
-        xray_gen_config
-        caddy_gen
-        sub_regen force
-        xray_active && xray_restart force
+        db_restore "$db_snap" || warn "Failed to restore the database"
+        db_rollback_runtime
         fw_apply || warn "Firewall may still allow port $new, run: vpsm firewall reload"
         err "Failed to update firewall for port $new, listen port not changed"
     fi
     caddy_reload || warn "Caddy reload failed after the port change; run: vpsm regen"
     install_units
     restart_changed_units
+    rm -f "$db_snap"
     ok "Listen port changed to $new; subscriptions and client nodes have been updated"
 }
 
@@ -435,7 +430,8 @@ set_key() {
 }
 
 set_shortid() {
-    local sid=${1:-$(gen_hex 4)} db_snap
+    local sid=${1:-} db_snap
+    [[ -n $sid ]] || sid=$(gen_hex 4)
     valid_shortid "$sid" || err "shortId must be a hex string of even length between 2 and 16"
     db_snap=$(db_snapshot) || err "Failed to back up the database"
     db_write --arg s "$sid" '.settings.short_ids = [$s]'

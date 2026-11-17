@@ -38,7 +38,7 @@ extra_sub_check_url() {
 }
 
 extra_sub_fetch() {
-    local alias=$1 url=$2 filter=${3:-} force=${4:-} dest_dir=${5:-$SUB_EXTRA}
+    local alias=$1 url=$2 filter=${3:-} dest_dir=${4:-$SUB_EXTRA}
     local stamp="$dest_dir/$alias.stamp" tmp size rc hop cur_url resolve_arg meta code redir
     local strict_flag=() curl_opts=()
     [[ -z ${VPSM_NO_SERVICE:-} ]] && strict_flag=(--strict)
@@ -129,7 +129,7 @@ extra_sub_attach() {
     extra_sub_exists "$alias" && err "External subscription $alias already exists"
     extra_sub_check_url "$url"
     extra_sub_check_filter "$filter"
-    extra_sub_fetch "$alias" "$url" "$filter" force || err "External subscription was not attached"
+    extra_sub_fetch "$alias" "$url" "$filter" || err "External subscription was not attached"
     db_write --arg a "$alias" --arg u "$url" --arg f "$filter" \
         '.settings.extra_subs = ((.settings.extra_subs // []) + [{alias:$a,url:$u,filter:$f}])'
     if ! ( sub_regen force ); then
@@ -139,7 +139,7 @@ extra_sub_attach() {
         ( sub_regen force ) || warn "Subscriptions were not regenerated after rolling back $alias"
         err "External subscription $alias was not attached"
     fi
-    rm -f "$EXTRA_REFRESH_STAMP"
+    rm -f "$EXTRA_REFRESH_STAMP" "$EXTRA_ATTEMPT_STAMP"
     ok "External subscription $alias attached, every user now sees its nodes"
 }
 
@@ -167,7 +167,7 @@ extra_sub_detach() {
         err "External subscription $alias was not detached"
     fi
     rm -rf "$bak"
-    rm -f "$db_snap" "$EXTRA_REFRESH_STAMP"
+    rm -f "$db_snap" "$EXTRA_REFRESH_STAMP" "$EXTRA_ATTEMPT_STAMP"
     ok "External subscription $alias detached from every user"
 }
 
@@ -185,7 +185,7 @@ extra_sub_set_filter() {
     done
     db_write --arg a "$alias" --arg f "$filter" \
         '.settings.extra_subs |= map(if .alias == $a then .filter = $f else . end)'
-    if ! ( extra_sub_fetch "$alias" "$url" "$filter" force && sub_regen force ); then
+    if ! ( extra_sub_fetch "$alias" "$url" "$filter" && sub_regen force ); then
         db_restore "$db_snap" || warn "Failed to restore the database"
         mkdir -p "$SUB_EXTRA"
         for f in "$bak"/*; do
@@ -197,7 +197,7 @@ extra_sub_set_filter() {
         err "Filter for external subscription $alias was not changed"
     fi
     rm -rf "$bak"
-    rm -f "$db_snap" "$EXTRA_REFRESH_STAMP"
+    rm -f "$db_snap" "$EXTRA_REFRESH_STAMP" "$EXTRA_ATTEMPT_STAMP"
     ok "Filter for external subscription $alias set to ${filter:-none}, every user is affected"
 }
 
@@ -210,7 +210,7 @@ extra_sub_refresh() {
         [[ -n $alias ]] || continue
         stamp="$SUB_EXTRA/$alias.stamp"
         before=$(stat -c %Y "$stamp" 2>/dev/null || echo 0)
-        extra_sub_fetch "$alias" "$url" "$filter" "$force" || rc=1
+        extra_sub_fetch "$alias" "$url" "$filter" || rc=1
         after=$(stat -c %Y "$stamp" 2>/dev/null || echo 0)
         [[ $before != "$after" ]] && changed=1
     done < <(db_get --arg a "$target" '.settings.extra_subs[]? | select($a == "all" or .alias == $a)
@@ -231,11 +231,19 @@ extra_sub_async_refresh() {
     exec 8>"$EXTRA_LOCK_FILE"
     flock -n 8 || return 0
 
-    if [[ $force != force && -f $EXTRA_REFRESH_STAMP ]] && ((EXTRA_REFRESH_MIN > 0)); then
+    if [[ $force != force ]]; then
         now=$(date +%s)
-        last=$(stat -c %Y "$EXTRA_REFRESH_STAMP" 2>/dev/null || echo 0)
-        if ((now - last < EXTRA_REFRESH_MIN)); then
-            return 0
+        if [[ -f $EXTRA_REFRESH_STAMP ]] && ((EXTRA_REFRESH_MIN > 0)); then
+            last=$(stat -c %Y "$EXTRA_REFRESH_STAMP" 2>/dev/null || echo 0)
+            if ((now - last < EXTRA_REFRESH_MIN)); then
+                return 0
+            fi
+        fi
+        if [[ -f $EXTRA_ATTEMPT_STAMP ]] && ((EXTRA_RETRY_MIN > 0)); then
+            last=$(stat -c %Y "$EXTRA_ATTEMPT_STAMP" 2>/dev/null || echo 0)
+            if ((now - last < EXTRA_RETRY_MIN)); then
+                return 0
+            fi
         fi
     fi
     local tmp alias url filter changed="" any_ok=""
@@ -243,8 +251,9 @@ extra_sub_async_refresh() {
 
     while IFS=$'\t' read -r alias url filter; do
         [[ -n $alias && -n $url ]] || continue
-        if extra_sub_fetch "$alias" "$url" "$filter" force "$tmp"; then
+        if extra_sub_fetch "$alias" "$url" "$filter" "$tmp"; then
             any_ok=1
+            printf '%s\t%s\n' "$url" "$filter" >"$tmp/$alias.meta"
             if ! cmp -s "$tmp/$alias.proxies.yaml" "$SUB_EXTRA/$alias.proxies.yaml" 2>/dev/null || \
                ! cmp -s "$tmp/$alias.names.yaml" "$SUB_EXTRA/$alias.names.yaml" 2>/dev/null; then
                 changed=1
@@ -252,6 +261,7 @@ extra_sub_async_refresh() {
         fi
     done < <(db_get '.settings.extra_subs[]? | "\(.alias)\t\(.url)\t\(.filter // "")"')
 
+    touch "$EXTRA_ATTEMPT_STAMP" 2>/dev/null || true
     [[ -n $any_ok ]] && touch "$EXTRA_REFRESH_STAMP" 2>/dev/null || true
 
     if [[ -z $changed ]]; then
@@ -263,12 +273,14 @@ extra_sub_async_refresh() {
         acquire_lock || exit 1
         mkdir -p "$SUB_EXTRA"
         chmod 700 "$SUB_EXTRA"
-        local updated="" f b alias
+        local updated="" f b alias cur_meta
         for f in "$tmp"/*.proxies.yaml; do
             [[ -e $f ]] || continue
             b=${f##*/}
             alias=${b%.proxies.yaml}
             extra_sub_exists "$alias" || continue
+            cur_meta=$(db_get --arg a "$alias" '.settings.extra_subs[]? | select(.alias == $a) | "\(.url)\t\(.filter // "")"')
+            [[ -f $tmp/$alias.meta && $cur_meta == "$(<"$tmp/$alias.meta")" ]] || continue
             install -m 600 "$tmp/$alias.proxies.yaml" "$SUB_EXTRA/$alias.proxies.yaml"
             install -m 600 "$tmp/$alias.names.yaml" "$SUB_EXTRA/$alias.names.yaml"
             install -m 600 "$tmp/$alias.stamp" "$SUB_EXTRA/$alias.stamp"

@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lint and test dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends shellcheck jq python3-yaml
+
+      - name: Bash syntax check
+        run: bash -n vpsm.sh install.sh src/*.sh tests/run.sh
+
+      - name: ShellCheck
+        run: shellcheck vpsm.sh install.sh src/*.sh tests/run.sh
+
+      - name: Python syntax check
+        run: python3 -m py_compile src/*.py tests/*.py
+
+      - name: Run Python unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Run Bash functional tests
+        run: bash tests/run.sh

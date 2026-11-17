@@ -2,6 +2,8 @@
 # vpsm - dedicated iptables inbound whitelist and Xray API guard
 
 FW_CHAIN="VPSM-IN"
+FW_DOCKER_CHAIN="VPSM-DOCKER"
+FW_DOCKER_IN_CHAIN="VPSM-DOCKER-IN"
 FW_OUT_CHAIN="VPSM-OUT"
 FW_SVC="vpsm-firewall"
 FW_STAMP="$ROOT/.fw_ports"
@@ -114,6 +116,26 @@ fw_rules() {
     echo "COMMIT"
 }
 
+fw_docker_rules() {
+    local spec proto dport
+    echo "*filter"
+    echo ":$FW_DOCKER_CHAIN - [0:0]"
+    echo ":$FW_DOCKER_IN_CHAIN - [0:0]"
+    echo "-A $FW_DOCKER_CHAIN -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN"
+    echo "-A $FW_DOCKER_CHAIN -m conntrack --ctstate INVALID -j DROP"
+    echo "-A $FW_DOCKER_CHAIN -i docker0 -j RETURN"
+    echo "-A $FW_DOCKER_CHAIN -i br-+ -j RETURN"
+    echo "-A $FW_DOCKER_CHAIN -o docker0 -j $FW_DOCKER_IN_CHAIN"
+    echo "-A $FW_DOCKER_CHAIN -o br-+ -j $FW_DOCKER_IN_CHAIN"
+    while read -r spec; do
+        proto=${spec#*/}
+        dport=$(tr - : <<<"${spec%/*}")
+        echo "-A $FW_DOCKER_IN_CHAIN -p $proto -m conntrack --ctorigdstport $dport -j RETURN"
+    done < <(fw_allowed | cut -f1)
+    echo "-A $FW_DOCKER_IN_CHAIN -j DROP"
+    echo "COMMIT"
+}
+
 fw_guard_rules() {
     echo "*filter"
     echo ":$FW_OUT_CHAIN - [0:0]"
@@ -125,38 +147,56 @@ fw_load() {
     local ipt=$1 chain=$2 hook=$3
     "$ipt-restore" --noflush || return 1
     "$ipt" -w -C "$hook" -j "$chain" 2>/dev/null || "$ipt" -w -I "$hook" 1 -j "$chain"
-    if [[ $hook == INPUT && $chain == "$FW_CHAIN" ]]; then
-        "$ipt" -w -L DOCKER-USER >/dev/null 2>&1 &&
-            { "$ipt" -w -C DOCKER-USER -j "$chain" 2>/dev/null || "$ipt" -w -I DOCKER-USER 1 -j "$chain"; }
-    fi
+    return 0
+}
+fw_delete_chain() {
+    local ipt=$1 chain=$2
+    cmd_exists "$ipt" || return 0
+    "$ipt" -w -F "$chain" 2>/dev/null || true
+    "$ipt" -w -X "$chain" 2>/dev/null || true
     return 0
 }
 fw_unload() {
     local ipt=$1 chain=$2 hook=$3
     cmd_exists "$ipt" || return 0
-    if [[ $hook == INPUT && $chain == "$FW_CHAIN" ]]; then
-        "$ipt" -w -L DOCKER-USER >/dev/null 2>&1 &&
-            while "$ipt" -w -D DOCKER-USER -j "$chain" 2>/dev/null; do :; done
-    fi
     while "$ipt" -w -D "$hook" -j "$chain" 2>/dev/null; do :; done
-    "$ipt" -w -F "$chain" 2>/dev/null
-    "$ipt" -w -X "$chain" 2>/dev/null
+    fw_delete_chain "$ipt" "$chain"
     return 0
 }
 fw_loaded() { cmd_exists "$1" && "$1" -w -C "${3:-INPUT}" -j "${2:-$FW_CHAIN}" 2>/dev/null; }
+
+fw_apply_docker() {
+    local ipt=$1
+    cmd_exists "$ipt" || return 0
+    # Migrate away from the legacy hook that placed VPSM-IN in DOCKER-USER.
+    if "$ipt" -w -L DOCKER-USER >/dev/null 2>&1; then
+        while "$ipt" -w -D DOCKER-USER -j "$FW_CHAIN" 2>/dev/null; do :; done
+        fw_docker_rules | fw_load "$ipt" "$FW_DOCKER_CHAIN" DOCKER-USER || return 1
+    else
+        fw_delete_chain "$ipt" "$FW_DOCKER_CHAIN"
+        fw_delete_chain "$ipt" "$FW_DOCKER_IN_CHAIN"
+    fi
+    return 0
+}
 
 fw_apply() {
     if [[ -n ${VPSM_NO_SERVICE:-} ]]; then
         msg "(dry run, skipped) iptables-restore --noflush:"
         fw_rules 4
-        fw_has_v6 && { msg "(dry run, skipped) ip6tables-restore --noflush:"; fw_rules 6; }
+        fw_docker_rules
+        fw_has_v6 && {
+            msg "(dry run, skipped) ip6tables-restore --noflush:"
+            fw_rules 6
+            fw_docker_rules
+        }
         return 0
     fi
     fw_rules 4 | fw_load iptables "$FW_CHAIN" INPUT || return 1
+    fw_apply_docker iptables || { fw_flush_input; return 1; }
     if fw_has_v6; then
         if ! cmd_exists ip6tables; then
             warn "ip6tables not found; IPv4 rules are loaded, but IPv6 inbound traffic is NOT filtered"
-        elif ! fw_rules 6 | fw_load ip6tables "$FW_CHAIN" INPUT; then
+        elif ! fw_rules 6 | fw_load ip6tables "$FW_CHAIN" INPUT || ! fw_apply_docker ip6tables; then
             warn "Failed to load IPv6 firewall rules, IPv6 inbound traffic is NOT filtered"
             fw_flush_input
             return 1
@@ -182,13 +222,24 @@ fw_guard_ensure() {
     systemctl is-enabled --quiet "$FW_SVC" 2>/dev/null || systemctl enable --quiet "$FW_SVC" 2>/dev/null
     return 0
 }
+fw_docker_needs_sync() {
+    local ipt=$1
+    cmd_exists "$ipt" || return 1
+    "$ipt" -w -L DOCKER-USER >/dev/null 2>&1 || return 1
+    "$ipt" -w -C DOCKER-USER -j "$FW_CHAIN" 2>/dev/null && return 0
+    "$ipt" -w -C DOCKER-USER -j "$FW_DOCKER_CHAIN" 2>/dev/null || return 0
+    return 1
+}
 fw_ports_ensure() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
     fw_enabled && fw_loaded iptables || return 0
-    local cur
+    local cur docker_sync=""
     cur=$(fw_allowed | cut -f1)
-    [[ $cur == "$(cat "$FW_STAMP" 2>/dev/null)" ]] && return 0
-    msg "Allowed inbound ports changed (${cur//$'\n'/ }), reloading firewall rules"
+    if fw_docker_needs_sync iptables || { fw_has_v6 && fw_docker_needs_sync ip6tables; }; then
+        docker_sync=1
+    fi
+    [[ -z $docker_sync && $cur == "$(cat "$FW_STAMP" 2>/dev/null)" ]] && return 0
+    msg "Allowed inbound ports or Docker rules changed (${cur//$'\n'/ }), reloading firewall rules"
     fw_apply || warn "Failed to reload firewall rules, run: vpsm firewall reload"
 }
 
@@ -202,9 +253,16 @@ fw_guard_text() {
     fi
 }
 fw_flush_input() {
-    [[ -n ${VPSM_NO_SERVICE:-} ]] && { msg "(dry run, skipped) remove $FW_CHAIN rules"; return 0; }
-    fw_unload iptables "$FW_CHAIN" INPUT
-    fw_unload ip6tables "$FW_CHAIN" INPUT
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && { msg "(dry run, skipped) remove $FW_CHAIN and $FW_DOCKER_CHAIN rules"; return 0; }
+    local ipt
+    for ipt in iptables ip6tables; do
+        cmd_exists "$ipt" || continue
+        "$ipt" -w -L DOCKER-USER >/dev/null 2>&1 &&
+            while "$ipt" -w -D DOCKER-USER -j "$FW_CHAIN" 2>/dev/null; do :; done
+        fw_unload "$ipt" "$FW_DOCKER_CHAIN" DOCKER-USER
+        fw_delete_chain "$ipt" "$FW_DOCKER_IN_CHAIN"
+        fw_unload "$ipt" "$FW_CHAIN" INPUT
+    done
 }
 fw_flush_all() {
     fw_flush_input
@@ -256,7 +314,7 @@ fw_enable() {
             systemctl is-active --quiet "$s" && warn "$s is running; its rules also apply and may block ports allowed here"
         done
         systemctl is-active --quiet docker 2>/dev/null &&
-            warn "Docker published ports use FORWARD and bypass INPUT rules"
+            msg "Docker detected: container egress is allowed and inbound published ports are filtered via DOCKER-USER"
     fi
     if ! fw_apply; then
         fw_flush_input
