@@ -39,9 +39,9 @@ user_add() {
     quota=$(parse_quota "${2:-0}") || err "Invalid traffic: ${2:-}, examples: 200G / 500M / 1.5T / 0 (max 1024T)"
     snap=$(state_snapshot)
     db_snap=$(db_snapshot) || err "Failed to back up the database"
-    db_write --arg name "$name" --arg uuid "$(gen_uuid)" --arg token "$(gen_hex 16)" \
+    VPSM_SECRET_UUID="$(gen_uuid)" VPSM_SECRET_TOKEN="$(gen_hex 16)" db_write --arg name "$name" \
         --argjson quota "$quota" \
-        '.users += [{name:$name,uuid:$uuid,token:$token,quota:$quota,up:0,down:0,
+        '.users += [{name:$name,uuid:(env.VPSM_SECRET_UUID // ""),token:(env.VPSM_SECRET_TOKEN // ""),quota:$quota,up:0,down:0,
                      enabled:true,disabled_reason:""}]'
     if ! ( apply_state "$snap" force ); then
         db_restore "$db_snap" || warn "Failed to restore the database"
@@ -256,7 +256,7 @@ user_token() {
     require_user "${1:-}"
     local db_snap
     db_snap=$(db_snapshot) || err "Failed to back up the database"
-    db_write --arg n "$1" --arg t "$(gen_hex 16)" '.users |= map(if .name == $n then .token = $t else . end)'
+    VPSM_SECRET_TOKEN="$(gen_hex 16)" db_write --arg n "$1" '.users |= map(if .name == $n then .token = (env.VPSM_SECRET_TOKEN // "") else . end)'
     if ! ( sub_regen force ); then
         db_restore "$db_snap" || warn "Failed to restore the database"
         db_rollback_runtime
@@ -419,7 +419,7 @@ set_key() {
     priv=$(sed -n 1p <<<"$pair")
     pub=$(sed -n 2p <<<"$pair")
     db_snap=$(db_snapshot) || err "Failed to back up the database"
-    db_write --arg a "$priv" --arg b "$pub" '.settings.private_key = $a | .settings.public_key = $b'
+    VPSM_SECRET_PRIV="$priv" db_write --arg b "$pub" '.settings.private_key = (env.VPSM_SECRET_PRIV // "") | .settings.public_key = $b'
     if ! ( xray_gen_config && { ! xray_active || { xray_restart force && svc_settled "$XRAY_SVC"; }; } && sub_regen force ); then
         db_restore "$db_snap" || warn "Failed to restore the database"
         db_rollback_runtime
@@ -475,12 +475,15 @@ set_udp() {
 }
 
 regen_all() {
+    fv_sync_env_file || warn "Failed to sync FuturesView environment file"
     xray_gen_config
     [[ -n $XRAY_CONF_CHANGED ]] && xray_active && xray_restart force
     caddy_gen
     sub_regen force || return 1
     caddy_reload || return 1
     fw_refresh || warn "Firewall rules were not reloaded, run: vpsm firewall reload"
+    install_units
+    restart_changed_units
     ok "Configs regenerated"
 }
 

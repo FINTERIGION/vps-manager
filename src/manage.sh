@@ -4,24 +4,40 @@
 install_units() {
     UNITS_CHANGED=""
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    local unit_dir=${VPSM_SYSTEMD_DIR:-/etc/systemd/system}
     local units=(vpsm-xray.service vpsm-caddy.service vpsm-traffic.service vpsm-traffic.timer vpsm-firewall.service vpsm-futures-view.service vpsm-extra-sub.service vpsm-extra-sub.path)
-    local u dst new f base domain port
+    local u dst tmp new f base domain port
+    mkdir -p "$unit_dir"
     domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
     port=$(fv_port 2>/dev/null || echo "8888")
     for u in "${units[@]}"; do
-        dst=/etc/systemd/system/$u
+        dst=$unit_dir/$u
         [[ -f $SH_DIR/systemd/$u ]] || continue
         if [[ $u == "vpsm-futures-view.service" ]] && declare -F fv_render_unit >/dev/null; then
-            new=$(fv_render_unit)
+            if fv_enabled || [[ -d $FV_DIR ]]; then
+                fv_ensure_user
+                fv_fix_perms
+            fi
+            new=$(fv_render_unit) || err "Failed to render $u"
         else
-            new=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/$u")
+            new=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" "$SH_DIR/systemd/$u") ||
+                err "Failed to render $u"
+        fi
+        [[ -n $new ]] || err "Rendered unit $u is empty"
+        if [[ $new =~ @(ROOT|DOMAIN|PORT|FV_USER|FV_HOME|FV_ENV_FILE|FV_ALLOWED_HOSTS|FV_ALLOWED_ORIGINS|FV_CPU_OPTS|FV_ENV_OPTS)@ ]]; then
+            err "Rendered unit $u still contains unexpanded placeholder: ${BASH_REMATCH[0]}"
         fi
         [[ -f $dst && $(<"$dst") == "$new" ]] && continue
-        printf '%s\n' "$new" >"$dst"
-        chmod 644 "$dst"
+        tmp=$(mktemp "$unit_dir/.$u.XXXXXX") || err "Failed to create temporary unit file for $u"
+        if ! printf '%s\n' "$new" >"$tmp"; then
+            rm -f "$tmp"
+            err "Failed to write $dst"
+        fi
+        chmod 644 "$tmp"
+        mv -f "$tmp" "$dst" || { rm -f "$tmp"; err "Failed to install $dst"; }
         UNITS_CHANGED+=" $u"
     done
-    for f in /etc/systemd/system/vpsm-*.service /etc/systemd/system/vpsm-*.timer /etc/systemd/system/vpsm-*.path; do
+    for f in "$unit_dir"/vpsm-*.service "$unit_dir"/vpsm-*.timer "$unit_dir"/vpsm-*.path; do
         [[ -e $f ]] || continue
         base=${f##*/}
         [[ " ${units[*]} " == *" $base "* ]] && continue
@@ -37,15 +53,28 @@ restart_changed_units() {
     local u
     for u in $UNITS_CHANGED; do
         case $u in
-            vpsm-xray.service) xray_active && xray_restart force && ok "Restarted $XRAY_SVC (unit updated)" ;;
-            vpsm-caddy.service) svc_active "$CADDY_SVC" && svc restart "$CADDY_SVC" && ok "Restarted $CADDY_SVC (unit updated)" ;;
-            vpsm-futures-view.service) fv_enabled && svc_active "$FV_SVC" && svc restart "$FV_SVC" && ok "Restarted $FV_SVC (unit updated)" ;;
+            vpsm-xray.service) svc_should_restart "$XRAY_SVC" && xray_restart force && ok "Restarted $XRAY_SVC (unit updated)" ;;
+            vpsm-caddy.service) svc_should_restart "$CADDY_SVC" && svc restart "$CADDY_SVC" && ok "Restarted $CADDY_SVC (unit updated)" ;;
+            vpsm-futures-view.service) fv_enabled && svc_should_restart "$FV_SVC" && svc restart "$FV_SVC" && ok "Restarted $FV_SVC (unit updated)" ;;
             vpsm-traffic.timer) svc try-restart vpsm-traffic.timer ;;
             vpsm-firewall.service) svc try-restart "$FW_SVC" ;;
             vpsm-extra-sub.path) svc try-restart vpsm-extra-sub.path ;;
         esac
     done
     return 0
+}
+
+run_installed_units() {
+    [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    VPSM_ROOT="$ROOT" VPSM_LOCK_HELD=1 bash -c '
+        set -o pipefail
+        sh_dir=$1
+        . "$sh_dir/src/core.sh"
+        for _lib in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
+            [[ -f $sh_dir/src/$_lib.sh ]] && . "$sh_dir/src/$_lib.sh"
+        done
+        install_units && restart_changed_units
+    ' _ "$ROOT/sh"
 }
 
 svc_targets() {
@@ -267,9 +296,7 @@ update_sh() {
         rm -rf "$new"
         err "Failed to replace scripts, previous version restored"
     fi
-    install_units
-    restart_changed_units
-    if VPSM_LOCK_HELD=1 "$ROOT/sh/vpsm.sh" regen; then
+    if VPSM_LOCK_HELD=1 "$ROOT/sh/vpsm.sh" regen && run_installed_units; then
         [[ -n $arg ]] && echo "$repo $ref" >"$ROOT/repo"
         rm -f "$db_snap"
         rm -rf "$ROOT/sh.old"
@@ -282,8 +309,7 @@ update_sh() {
         fi
         rm -rf "$ROOT/sh"
         mv "$ROOT/sh.old" "$ROOT/sh" || err "Failed to restore previous scripts"
-        install_units
-        restart_changed_units
+        run_installed_units || warn "Failed to restore systemd units with previous scripts"
         VPSM_LOCK_HELD=1 "$ROOT/sh/vpsm.sh" regen >/dev/null 2>&1 || warn "Failed to regenerate configs with restored scripts"
         warn "Previous scripts and units restored. Retry with: vpsm update sh"
         return 1
@@ -375,11 +401,14 @@ do_uninstall() {
         ok "Uninstalled (dry run)"
         return 0
     fi
-    rm -f /etc/systemd/system/vpsm-{xray,caddy,traffic,firewall,futures-view,extra-sub}.service /etc/systemd/system/vpsm-{traffic.timer,extra-sub.path}
+    local unit_dir=${VPSM_SYSTEMD_DIR:-/etc/systemd/system}
+    rm -f "$unit_dir"/vpsm-{xray,caddy,traffic,firewall,futures-view,extra-sub}.service "$unit_dir"/vpsm-{traffic.timer,extra-sub.path}
     rm -f /usr/local/bin/vpsm /etc/sysctl.d/99-vpsm-bbr.conf
     systemctl daemon-reload
-    userdel "$SVC_USER" 2>/dev/null
-    userdel "$FV_USER" 2>/dev/null
+    userdel "$SVC_USER" 2>/dev/null || true
+    groupdel "$SVC_USER" 2>/dev/null || true
+    userdel "$FV_USER" 2>/dev/null || true
+    groupdel "$FV_USER" 2>/dev/null || true
     rm -rf "$ROOT"
     ok "Uninstalled"
 }

@@ -132,6 +132,7 @@ caddy_gen() {
 
     if fv_enabled; then
         fv_handle="	handle /api/* {
+		log_skip
 		reverse_proxy 127.0.0.1:$(fv_port)
 	}
 "

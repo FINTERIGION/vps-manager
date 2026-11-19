@@ -39,7 +39,7 @@ extra_sub_check_url() {
 
 extra_sub_fetch() {
     local alias=$1 url=$2 filter=${3:-} dest_dir=${4:-$SUB_EXTRA}
-    local stamp="$dest_dir/$alias.stamp" tmp size rc hop cur_url resolve_arg meta code redir
+    local stamp="$dest_dir/$alias.stamp" tmp size rc hop cur_url resolve_arg meta code redir max_kb
     local strict_flag=() curl_opts=()
     [[ -z ${VPSM_NO_SERVICE:-} ]] && strict_flag=(--strict)
     [[ $url =~ ^https?:// ]] || { warn "External subscription $alias has an invalid URL"; return 1; }
@@ -55,17 +55,23 @@ extra_sub_fetch() {
         [[ -n $resolve_arg ]] && curl_opts+=(--resolve "$resolve_arg")
         rm -f "$tmp/headers" "$tmp/source.yaml"
         # Disable curl's built-in -L redirect following so each hop is SSRF-validated
-        # before connecting, and pin DNS via --resolve when resolved.
+        # before connecting, pin DNS via --resolve when resolved, and enforce a kernel
+        # RLIMIT_FSIZE cap so chunked streams on older curl (< 8.4) cannot exhaust disk.
+        max_kb=$(((EXTRA_MAX_BYTES + 1023) / 1024))
         rc=0
-        meta=$(curl -fsS --max-redirs 0 --retry 2 --connect-timeout 10 --max-time 45 \
-            --max-filesize "$EXTRA_MAX_BYTES" --proto '=http,https' \
-            "${curl_opts[@]}" -A "$EXTRA_UA" -D "$tmp/headers" -o "$tmp/source.yaml" \
-            -w '%{http_code}\t%{redirect_url}' "$cur_url") || rc=$?
+        meta=$(
+            ulimit -c 0 2>/dev/null || true
+            ulimit -f "$max_kb" 2>/dev/null || true
+            exec curl -fsS --max-redirs 0 --retry 2 --connect-timeout 10 --max-time 45 \
+                --max-filesize "$EXTRA_MAX_BYTES" --proto '=http,https' \
+                "${curl_opts[@]}" -A "$EXTRA_UA" -D "$tmp/headers" -o "$tmp/source.yaml" \
+                -w '%{http_code}\t%{redirect_url}' "$cur_url"
+        ) || rc=$?
         if ((rc != 0)); then
             rm -rf "$tmp"
             if ((rc == 22)); then
                 warn "Failed to download external subscription $alias (HTTP error, the URL may be expired or blocked)"
-            elif ((rc == 63)); then
+            elif ((rc == 63 || rc == 23 || rc == 153)); then
                 warn "Failed to download external subscription $alias (file exceeds ${EXTRA_MAX_BYTES} bytes)"
             else
                 warn "Failed to download external subscription $alias (curl exit $rc)"
@@ -224,6 +230,21 @@ extra_sub_refresh() {
 
 extra_sub_async_refresh() {
     local force=${1:-} count now last
+    if [[ $force != force ]]; then
+        now=$(date +%s)
+        if [[ -f $EXTRA_REFRESH_STAMP ]] && ((EXTRA_REFRESH_MIN > 0)); then
+            last=$(stat -c %Y "$EXTRA_REFRESH_STAMP" 2>/dev/null || echo 0)
+            if ((now - last < EXTRA_REFRESH_MIN)); then
+                return 0
+            fi
+        fi
+        if [[ -f $EXTRA_ATTEMPT_STAMP ]] && ((EXTRA_RETRY_MIN > 0)); then
+            last=$(stat -c %Y "$EXTRA_ATTEMPT_STAMP" 2>/dev/null || echo 0)
+            if ((now - last < EXTRA_RETRY_MIN)); then
+                return 0
+            fi
+        fi
+    fi
     count=$(extra_sub_count)
     ((count > 0)) || return 0
 

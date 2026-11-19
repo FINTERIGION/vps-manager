@@ -27,22 +27,30 @@ fv_gen_password() {
 
 fv_ensure_user() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
+    if ! getent group "$FV_USER" >/dev/null 2>&1; then
+        groupadd --system "$FV_USER" >/dev/null 2>&1 ||
+            err "Failed to create system group $FV_USER"
+    fi
     if ! getent passwd "$FV_USER" >/dev/null 2>&1; then
-        useradd --system --no-create-home --shell /usr/sbin/nologin "$FV_USER" ||
-            useradd --system --no-create-home --shell /sbin/nologin "$FV_USER" ||
+        useradd --system --gid "$FV_USER" --no-create-home --shell /usr/sbin/nologin "$FV_USER" >/dev/null 2>&1 ||
+            useradd --system --gid "$FV_USER" --no-create-home --shell /sbin/nologin "$FV_USER" >/dev/null 2>&1 ||
             err "Failed to create system user $FV_USER"
     fi
 }
 
 fv_fix_perms() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
-    [[ -d $FV_DIR ]] || return 0
     fv_ensure_user
-    chown "$FV_USER:$FV_USER" "$FV_DIR"
-    find "$FV_DIR" -mindepth 1 -maxdepth 1 ! -name '.env' -exec chown -hR "$FV_USER:$FV_USER" {} + 2>/dev/null || true
-    if [[ -f $FV_DIR/.env && ! -L $FV_DIR/.env ]]; then
-        chown root:root "$FV_DIR/.env"
-        chmod 600 "$FV_DIR/.env"
+    mkdir -p "$FV_HOME"
+    chown -h "$FV_USER:$FV_USER" "$FV_HOME"
+    chmod 700 "$FV_HOME"
+    if [[ -d $FV_DIR && ! -L $FV_DIR ]]; then
+        chown -h "$FV_USER:$FV_USER" "$FV_DIR"
+        find "$FV_DIR" -mindepth 1 -maxdepth 1 -exec chown -hR "$FV_USER:$FV_USER" {} + 2>/dev/null || true
+    fi
+    if [[ -f $FV_ENV_FILE && ! -L $FV_ENV_FILE ]]; then
+        chown root:root "$FV_ENV_FILE"
+        chmod 600 "$FV_ENV_FILE"
     fi
 }
 
@@ -91,14 +99,115 @@ fv_webui_url() {
 
 fv_sync_static_assets() {
     mkdir -p "$WWW_DIR"
-    if [[ -d $FV_DIR/web/static && ! -L $FV_DIR/web/static ]] &&
-        [[ -n $(find "$FV_DIR/web/static" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
-        find "$WWW_DIR" -mindepth 1 -delete 2>/dev/null || rm -rf "${WWW_DIR:?}"/*
-        cp -rP --no-preserve=ownership "$FV_DIR/web/static/." "$WWW_DIR/"
-        find "$WWW_DIR" -type l -delete 2>/dev/null || true
-        find "$WWW_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
-        find "$WWW_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
+    [[ -d $FV_DIR && ! -L $FV_DIR ]] || return 0
+    [[ -d $FV_DIR/web && ! -L $FV_DIR/web ]] || return 0
+    [[ -d $FV_DIR/web/static && ! -L $FV_DIR/web/static ]] || return 0
+
+    local stage rc tar_rc
+    stage=$(mktemp -d "$ROOT/.www.XXXXXX") || return 1
+    fv_run python3 -c '
+import io, os, stat, sys, tarfile
+
+fv_dir = sys.argv[1]
+dir_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+
+def open_dir_nofollow(path, dir_fd=None):
+    fd = os.open(path, dir_flags, dir_fd=dir_fd)
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        os.close(fd)
+        raise OSError("not a directory")
+    return fd
+
+try:
+    root_fd = open_dir_nofollow(fv_dir)
+    try:
+        web_fd = open_dir_nofollow("web", dir_fd=root_fd)
+    finally:
+        os.close(root_fd)
+    try:
+        static_fd = open_dir_nofollow("static", dir_fd=web_fd)
+    finally:
+        os.close(web_fd)
+except FileNotFoundError:
+    sys.exit(0)
+except OSError:
+    sys.exit(2)
+
+def stream_dir(tf, dir_fd, prefix):
+    for name in sorted(os.listdir(dir_fd)):
+        if name in (".", "..") or "/" in name or "\0" in name:
+            continue
+        rel = f"{prefix}/{name}" if prefix else name
+        try:
+            lst = os.lstat(name, dir_fd=dir_fd)
+        except OSError:
+            continue
+        if stat.S_ISLNK(lst.st_mode):
+            continue
+        if stat.S_ISDIR(lst.st_mode):
+            try:
+                sub_fd = open_dir_nofollow(name, dir_fd=dir_fd)
+            except OSError:
+                continue
+            try:
+                ti = tarfile.TarInfo(name=rel)
+                ti.type = tarfile.DIRTYPE
+                ti.mode = 0o755
+                tf.addfile(ti)
+                stream_dir(tf, sub_fd, rel)
+            finally:
+                os.close(sub_fd)
+        elif stat.S_ISREG(lst.st_mode):
+            try:
+                ffd = os.open(name, file_flags, dir_fd=dir_fd)
+            except OSError:
+                continue
+            try:
+                fst = os.fstat(ffd)
+                if not stat.S_ISREG(fst.st_mode):
+                    continue
+                with os.fdopen(ffd, "rb") as fobj:
+                    ffd = -1
+                    data = fobj.read()
+                ti = tarfile.TarInfo(name=rel)
+                ti.type = tarfile.REGTYPE
+                ti.mode = 0o644
+                ti.size = len(data)
+                tf.addfile(ti, io.BytesIO(data))
+            finally:
+                if ffd >= 0:
+                    os.close(ffd)
+
+try:
+    with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as tf:
+        stream_dir(tf, static_fd, "")
+finally:
+    os.close(static_fd)
+' "$FV_DIR" | tar --no-same-owner --no-same-permissions -xf - -C "$stage" 2>/dev/null
+    rc=${PIPESTATUS[0]}
+    tar_rc=${PIPESTATUS[1]}
+    if ((rc != 0)); then
+        rm -rf "$stage"
+        ((rc == 2)) && warn "Refusing to sync FuturesView static assets through a symlink"
+        return 0
     fi
+    if ((tar_rc != 0)); then
+        rm -rf "$stage"
+        warn "Failed to extract FuturesView static assets"
+        return 1
+    fi
+    find "$stage" -mindepth 1 ! -type f ! -type d -delete 2>/dev/null || true
+    if [[ -n $(find "$stage" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
+        find "$stage" -type d -exec chmod 755 {} + 2>/dev/null || true
+        find "$stage" -type f -exec chmod 644 {} + 2>/dev/null || true
+        find "$WWW_DIR" -mindepth 1 -delete 2>/dev/null || rm -rf "${WWW_DIR:?}"/*
+        find "$stage" -mindepth 1 -maxdepth 1 -exec mv -f {} "$WWW_DIR/" + 2>/dev/null ||
+            cp -rP --no-preserve=ownership "$stage/." "$WWW_DIR/"
+        chmod 755 "$WWW_DIR"
+    fi
+    rm -rf "$stage"
 }
 
 fv_apply_password() {
@@ -106,7 +215,7 @@ fv_apply_password() {
     [[ -x $py ]] || return 1
     printf '%s' "$pass" | fv_run "$py" -c "import sys; from web.auth import set_password; set_password(sys.stdin.read())" || return 1
     fv_fix_perms
-    db_write --arg p "$pass" '.settings.futures_view.password = $p'
+    VPSM_SECRET_PASS="$pass" db_write '.settings.futures_view.password = (env.VPSM_SECRET_PASS // "")'
 }
 
 fv_get_password() {
@@ -135,20 +244,22 @@ fv_escape_env_val() {
 }
 
 fv_sync_env_file() {
-    local key secret env_file="$FV_DIR/.env" tmp="" out_tmp esc_k esc_s
+    local key secret env_file="$FV_ENV_FILE" legacy="$FV_DIR/.env" tmp="" out_tmp esc_k esc_s migrated=""
     key=$(fv_get_dce_api_key)
     secret=$(fv_get_dce_secret)
-    if [[ ! -d $FV_DIR ]]; then
-        [[ -n $key || -n $secret ]] || return 0
-        mkdir -p "$FV_DIR"
-    fi
     if [[ -f $env_file && ! -L $env_file ]]; then
         tmp=$(grep -v -E '^(DCE_API_KEY|DCE_KEY|FT_DCE_API_KEY|DCE_SECRET|DCE_API_SECRET|FT_DCE_SECRET)=' "$env_file" 2>/dev/null || true)
+    elif [[ ! -e $env_file && -f $legacy && ! -L $legacy ]]; then
+        if [[ -n ${VPSM_NO_SERVICE:-} || $(stat -c %u "$legacy" 2>/dev/null || echo -1) == 0 ]]; then
+            tmp=$(grep -v -E '^(DCE_API_KEY|DCE_KEY|FT_DCE_API_KEY|DCE_SECRET|DCE_API_SECRET|FT_DCE_SECRET)=' "$legacy" 2>/dev/null || true)
+            migrated=1
+        fi
     fi
     if [[ -n $key || -n $secret ]]; then
+        mkdir -p "$ROOT"
         esc_k=$(fv_escape_env_val "$key")
         esc_s=$(fv_escape_env_val "$secret")
-        out_tmp=$(umask 077; mktemp "$FV_DIR/.env.XXXXXX") || return 1
+        out_tmp=$(umask 077; mktemp "$ROOT/.fv.env.XXXXXX") || return 1
         {
             [[ -n $tmp ]] && printf '%s\n' "$tmp"
             if [[ -n $key ]]; then
@@ -165,24 +276,25 @@ fv_sync_env_file() {
         chmod 600 "$out_tmp" 2>/dev/null || true
         [[ -z ${VPSM_NO_SERVICE:-} ]] && chown root:root "$out_tmp" 2>/dev/null || true
         mv -f "$out_tmp" "$env_file"
+        [[ -n $migrated ]] && rm -f "$legacy"
     else
         if [[ -n $tmp ]]; then
-            out_tmp=$(umask 077; mktemp "$FV_DIR/.env.XXXXXX") || return 1
+            mkdir -p "$ROOT"
+            out_tmp=$(umask 077; mktemp "$ROOT/.fv.env.XXXXXX") || return 1
             printf '%s\n' "$tmp" > "$out_tmp"
             chmod 600 "$out_tmp" 2>/dev/null || true
             [[ -z ${VPSM_NO_SERVICE:-} ]] && chown root:root "$out_tmp" 2>/dev/null || true
             mv -f "$out_tmp" "$env_file"
+            [[ -n $migrated ]] && rm -f "$legacy"
         else
             rm -f "$env_file"
+            [[ -n $migrated ]] && rm -f "$legacy"
         fi
     fi
 }
 
 fv_render_unit() {
     local domain port xray_port cpu_limit cpu_opts="" allowed_hosts allowed_origins content
-    if [[ -z ${VPSM_NO_SERVICE:-} ]] && { fv_enabled || [[ -d $FV_DIR ]]; }; then
-        fv_fix_perms
-    fi
     domain=$(db_get '.settings.domain // ""' 2>/dev/null || echo "")
     port=$(fv_port 2>/dev/null || echo "8888")
     xray_port=$(db_get '.settings.port // 443' 2>/dev/null || echo "443")
@@ -203,8 +315,9 @@ fv_render_unit() {
         allowed_origins="https://127.0.0.1,http://127.0.0.1"
     fi
     content=$(sed -e "s#@ROOT@#$ROOT#g" -e "s#@DOMAIN@#$domain#g" -e "s#@PORT@#$port#g" \
-        -e "s#@FV_USER@#$FV_USER#g" -e "s#@FV_ALLOWED_HOSTS@#$allowed_hosts#g" \
-        -e "s#@FV_ALLOWED_ORIGINS@#$allowed_origins#g" "$SH_DIR/systemd/vpsm-futures-view.service")
+        -e "s#@FV_USER@#$FV_USER#g" -e "s#@FV_HOME@#$FV_HOME#g" -e "s#@FV_ENV_FILE@#$FV_ENV_FILE#g" \
+        -e "s#@FV_ALLOWED_HOSTS@#$allowed_hosts#g" \
+        -e "s#@FV_ALLOWED_ORIGINS@#$allowed_origins#g" "$SH_DIR/systemd/vpsm-futures-view.service") || return 1
     if [[ -n $cpu_opts ]]; then
         content="${content//@FV_CPU_OPTS@/$cpu_opts}"
     else
@@ -359,27 +472,13 @@ fv_deploy() {
     fv_check_prereqs
 
     mkdir -p "${FV_DIR%/*}"
+    fv_sync_env_file
     if [[ ! -d $FV_DIR/.git ]]; then
-        local saved_env=""
-        if [[ -f $FV_DIR/.env && ! -L $FV_DIR/.env ]]; then
-            saved_env=$(umask 077; mktemp "$ROOT/.fv.env.XXXXXX") || err "Failed to back up FuturesView .env"
-            cp -p "$FV_DIR/.env" "$saved_env"
-            rm -f "$FV_DIR/.env"
-        fi
         mkdir -p "$FV_DIR"
         fv_fix_perms
         msg "Cloning $FV_REPO into $FV_DIR ..."
         if ! fv_run git clone "$FV_REPO" "$FV_DIR"; then
-            if [[ -n $saved_env ]]; then
-                mkdir -p "$FV_DIR"
-                mv -f "$saved_env" "$FV_DIR/.env"
-                fv_fix_perms
-            fi
             err "Failed to clone $FV_REPO"
-        fi
-        if [[ -n $saved_env ]]; then
-            mv -f "$saved_env" "$FV_DIR/.env"
-            fv_fix_perms
         fi
     else
         fv_fix_perms
@@ -403,7 +502,7 @@ fv_deploy() {
     msg "Configuring high-strength WebUI password ..."
     if ! fv_apply_password "$pass"; then
         warn "Could not automatically apply password via web.auth, setting in database"
-        db_write --arg p "$pass" '.settings.futures_view.password = $p'
+        VPSM_SECRET_PASS="$pass" db_write '.settings.futures_view.password = (env.VPSM_SECRET_PASS // "")'
     fi
 
     msg "Building frontend assets in $FV_DIR/webui ..."
@@ -486,6 +585,7 @@ fv_update() {
 
     fv_sync_env_file
     fv_fix_perms
+    install_units
 
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         msg "Restarting $FV_SVC service ..."
@@ -543,7 +643,7 @@ fv_set_password_cmd() {
         echo "New password: $new_p"
     else
         warn "Could not update password via web.auth, saving to database"
-        db_write --arg p "$new_p" '.settings.futures_view.password = $p'
+        VPSM_SECRET_PASS="$new_p" db_write '.settings.futures_view.password = (env.VPSM_SECRET_PASS // "")'
         echo "New password: $new_p"
     fi
 }
@@ -603,7 +703,7 @@ fv_set_cpu_limit_cmd() {
     install_units
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         systemctl daemon-reload
-        if svc_active "$FV_SVC"; then
+        if svc_should_restart "$FV_SVC"; then
             systemctl restart "$FV_SVC" || warn "Failed to restart $FV_SVC with new CPU limit"
         fi
     fi
@@ -613,6 +713,17 @@ fv_set_cpu_limit_cmd() {
     else
         ok "FuturesView CPU limit disabled (unlimited CPU)"
     fi
+}
+
+fv_read_secret() {
+    local prompt=$1 val=""
+    if [[ -t 0 ]]; then
+        read -r -s -p "$prompt" val || { echo >&2; return 130; }
+        echo >&2
+    else
+        read -r val || return 130
+    fi
+    printf '%s\n' "$val"
 }
 
 fv_set_dce_credentials_cmd() {
@@ -648,19 +759,19 @@ fv_set_dce_credentials_cmd() {
         choice=$(ask "Choose: ") || return 0
         case $choice in
             1)
-                key=$(ask "Enter DCE API Key: ") || return 0
-                secret=$(ask "Enter DCE Secret: ") || return 0
+                key=$(fv_read_secret "Enter DCE API Key: ") || return 0
+                secret=$(fv_read_secret "Enter DCE Secret: ") || return 0
                 if [[ -z $key || -z $secret ]]; then
                     warn "Both API Key and Secret are required by DCE."
                 fi
                 ;;
             2)
-                key=$(ask "Enter DCE API Key: ") || return 0
+                key=$(fv_read_secret "Enter DCE API Key: ") || return 0
                 secret="$curr_s"
                 ;;
             3)
                 key="$curr_k"
-                secret=$(ask "Enter DCE Secret: ") || return 0
+                secret=$(fv_read_secret "Enter DCE Secret: ") || return 0
                 ;;
             4)
                 key=""
@@ -735,7 +846,7 @@ fv_set_dce_credentials_cmd() {
                     secret=$arg2
                 else
                     if [[ -t 0 ]]; then
-                        secret=$(ask "Enter DCE Secret (leave blank to keep current): ")
+                        secret=$(fv_read_secret "Enter DCE Secret (leave blank to keep current): ") || return 0
                         [[ -z $secret ]] && secret="$curr_s"
                     else
                         secret="$curr_s"
@@ -749,13 +860,13 @@ fv_set_dce_credentials_cmd() {
         err "API credentials must not contain control characters or newlines"
     fi
 
-    db_write --arg k "$key" --arg s "$secret" \
-        '.settings.futures_view.dce_api_key = $k | .settings.futures_view.dce_secret = $s'
+    VPSM_SECRET_KEY="$key" VPSM_SECRET_SEC="$secret" db_write \
+        '.settings.futures_view.dce_api_key = (env.VPSM_SECRET_KEY // "") | .settings.futures_view.dce_secret = (env.VPSM_SECRET_SEC // "")'
     fv_sync_env_file
     install_units
     if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
         systemctl daemon-reload
-        if svc_active "$FV_SVC"; then
+        if svc_should_restart "$FV_SVC"; then
             systemctl restart "$FV_SVC" || warn "Failed to restart $FV_SVC with new DCE credentials"
         fi
     fi
@@ -792,7 +903,7 @@ fv_remove() {
     if [[ -d $FV_DIR ]]; then
         ans=$(ask "Delete the FuturesView directory ($FV_DIR)? [y/N]: ") || return 0
         if [[ ${ans,,} == y ]]; then
-            rm -rf "$FV_DIR" "$FV_HOME"
+            rm -rf "$FV_DIR" "$FV_HOME" "$FV_ENV_FILE"
             ok "Deleted $FV_DIR"
         fi
     fi

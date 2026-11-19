@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # vpsm - isolated functional tests; never modify host security or service state
-# shellcheck disable=SC2329
+# shellcheck disable=SC2329,SC2030,SC2031
 set -o pipefail
 
 PROJECT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -664,9 +664,12 @@ fv_rendered=$(fv_render_unit)
 [[ $fv_rendered != *"DCE_API_KEY"* && $fv_rendered != *"DCE_SECRET"* ]] &&
     ok_test "FuturesView unit does not leak plaintext DCE credentials" ||
     fail_test "FuturesView unit does not leak plaintext DCE credentials"
-assert_file_contains "$FV_DIR/.env" 'DCE_API_KEY="test-dce-key-abc12345"' "DCE API key is written to protected .env file"
-assert_file_contains "$FV_DIR/.env" 'DCE_SECRET="test-dce-secret-xyz67890"' "DCE secret is written to protected .env file"
-assert_eq "600" "$(stat -c %a "$FV_DIR/.env")" "FuturesView .env file has 0600 permissions"
+assert_file_contains "$FV_ENV_FILE" 'DCE_API_KEY="test-dce-key-abc12345"' "DCE API key is written to protected futures-view.env file"
+assert_file_contains "$FV_ENV_FILE" 'DCE_SECRET="test-dce-secret-xyz67890"' "DCE secret is written to protected futures-view.env file"
+assert_eq "600" "$(stat -c %a "$FV_ENV_FILE")" "FuturesView env file has 0600 permissions"
+[[ ! -e "$FV_DIR/.env" ]] &&
+    ok_test "FuturesView env file is stored outside vpsm-fv-writable FV_DIR" ||
+    fail_test "FuturesView env file is stored outside vpsm-fv-writable FV_DIR"
 
 fv_status_dce_set=$(fv_status)
 [[ $fv_status_dce_set == *"DCE Credentials: Configured (Key: test****2345, Secret: test****7890)"* ]] &&
@@ -675,9 +678,9 @@ fv_status_dce_set=$(fv_status)
 fv_set_dce_credentials_cmd clear >/dev/null 2>&1
 assert_eq "" "$(fv_get_dce_api_key)" "fv_set_dce_credentials_cmd clear resets DCE API key"
 assert_eq "" "$(fv_get_dce_secret)" "fv_set_dce_credentials_cmd clear resets DCE secret"
-[[ ! -f "$FV_DIR/.env" ]] &&
-    ok_test "cleared DCE credentials removes .env file when empty" ||
-    fail_test "cleared DCE credentials removes .env file when empty"
+[[ ! -f "$FV_ENV_FILE" ]] &&
+    ok_test "cleared DCE credentials removes futures-view.env when empty" ||
+    fail_test "cleared DCE credentials removes futures-view.env when empty"
 
 db_write '.settings.futures_view.enabled = false'
 caddy_gen
@@ -1126,6 +1129,249 @@ pwd_stdin_warn=$(printf 'PassViaStdin123\n' | fv_set_password_cmd - 2>&1 >/dev/n
     fail_test "fv_set_password_cmd reads password cleanly via '-' stdin"
 assert_eq "PassViaStdin123" "$(fv_get_password)" "fv_set_password_cmd '-' stores password"
 db_write '.settings.futures_view.password = ""'
+
+# 14. Regression tests for unit rendering, upgrade isolation, symlink/TOCTOU, secret argv, and stream cap
+# 14a. Caddy /api/* skips sub.log and vpsm-extra-sub.service disables start-limit-hit
+db_write '.settings.futures_view.enabled = true'
+caddy_gen
+assert_file_contains "$CADDYFILE" "log_skip" "Caddyfile includes log_skip directives"
+awk '/handle \/api\/\*/,/}/' "$CADDYFILE" | grep -qF "log_skip" &&
+    ok_test "Caddyfile /api/* handle explicitly skips subscription log" ||
+    fail_test "Caddyfile /api/* handle explicitly skips subscription log"
+assert_file_contains "$PROJECT/systemd/vpsm-extra-sub.service" "StartLimitIntervalSec=0" \
+    "vpsm-extra-sub.service sets StartLimitIntervalSec=0 to prevent burst start-limit-hit"
+db_write '.settings.futures_view.enabled = false'
+caddy_gen
+
+# 14b. fv_render_unit includes HOME and root-owned EnvironmentFile, leaving no placeholders
+fv_rendered=$(fv_render_unit)
+[[ $fv_rendered == *"EnvironmentFile=-$FV_ENV_FILE"* &&
+    $fv_rendered == *"Environment=HOME=$FV_HOME"* &&
+    $fv_rendered == *"ReadWritePaths=$FV_DIR -$FV_HOME"* &&
+    $fv_rendered != *"@"* ]] &&
+    ok_test "fv_render_unit renders HOME, root-owned EnvironmentFile, and zero placeholders" ||
+    fail_test "fv_render_unit renders HOME, root-owned EnvironmentFile, and zero placeholders"
+
+# 14c. install_units rejects empty or placeholder-leaking unit output without clobbering existing file
+mkdir -p "$TMP/unit-bin" "$TMP/unit-dir"
+cat >"$TMP/unit-bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$UNIT_SYSCTL_LOG"
+case ${1:-} in
+    is-active)
+        printf '%s\n' "${UNIT_SVC_STATE:-inactive}"
+        [[ ${UNIT_SVC_STATE:-inactive} == active ]] && exit 0 || exit 3
+        ;;
+    *) exit 0 ;;
+esac
+EOF
+cat >"$TMP/unit-bin/groupadd" <<'EOF'
+#!/usr/bin/env bash
+printf 'groupadd %s\n' "$*" >>"$UNIT_USER_LOG"
+exit 0
+EOF
+cat >"$TMP/unit-bin/useradd" <<'EOF'
+#!/usr/bin/env bash
+printf 'useradd %s\n' "$*" >>"$UNIT_USER_LOG"
+exit 0
+EOF
+cat >"$TMP/unit-bin/getent" <<'EOF'
+#!/usr/bin/env bash
+[[ ${UNIT_GETENT_MISSING:-0} == 1 ]] && exit 2
+exit 0
+EOF
+cat >"$TMP/unit-bin/chown" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 755 "$TMP/unit-bin/"*
+export UNIT_SYSCTL_LOG="$TMP/unit-sysctl.log"
+export UNIT_USER_LOG="$TMP/unit-user.log"
+: >"$UNIT_SYSCTL_LOG"
+: >"$UNIT_USER_LOG"
+printf 'KEEP-VALID-UNIT\n' >"$TMP/unit-dir/vpsm-futures-view.service"
+if (
+    unset VPSM_NO_SERVICE
+    export VPSM_SYSTEMD_DIR="$TMP/unit-dir"
+    PATH="$TMP/unit-bin:$PATH"
+    fv_render_unit() { printf 'User=@FV_USER@\n'; }
+    install_units
+) >/dev/null 2>&1; then
+    fail_test "install_units rejects rendered unit containing unexpanded @FV_USER@"
+else
+    ok_test "install_units rejects rendered unit containing unexpanded @FV_USER@"
+fi
+assert_eq "KEEP-VALID-UNIT" "$(cat "$TMP/unit-dir/vpsm-futures-view.service")" \
+    "rejected unit render preserves existing unit file"
+if (
+    unset VPSM_NO_SERVICE
+    export VPSM_SYSTEMD_DIR="$TMP/unit-dir"
+    PATH="$TMP/unit-bin:$PATH"
+    fv_render_unit() { return 1; }
+    install_units
+) >/dev/null 2>&1; then
+    fail_test "install_units rejects failed/empty fv_render_unit"
+else
+    ok_test "install_units rejects failed/empty fv_render_unit"
+fi
+assert_eq "KEEP-VALID-UNIT" "$(cat "$TMP/unit-dir/vpsm-futures-view.service")" \
+    "failed fv_render_unit never writes an empty unit file"
+
+# 14d. fv_ensure_user creates both system group and user explicitly
+: >"$UNIT_USER_LOG"
+(
+    unset VPSM_NO_SERVICE
+    UNIT_GETENT_MISSING=1 PATH="$TMP/unit-bin:$PATH" fv_ensure_user
+) >/dev/null 2>&1
+assert_file_contains "$UNIT_USER_LOG" "groupadd --system vpsm-fv" "fv_ensure_user creates system group vpsm-fv"
+assert_file_contains "$UNIT_USER_LOG" "useradd --system --gid vpsm-fv" "fv_ensure_user creates user with explicit primary group"
+
+# 14e. restart_changed_units restarts activating/failed services but skips inactive ones
+db_write '.settings.futures_view.enabled = true'
+: >"$UNIT_SYSCTL_LOG"
+(
+    unset VPSM_NO_SERVICE
+    UNITS_CHANGED=" vpsm-futures-view.service"
+    UNIT_SVC_STATE=activating PATH="$TMP/unit-bin:$PATH" restart_changed_units
+) >/dev/null 2>&1
+assert_file_contains "$UNIT_SYSCTL_LOG" "restart vpsm-futures-view" \
+    "restart_changed_units restarts crash-looping (activating) FuturesView service"
+: >"$UNIT_SYSCTL_LOG"
+(
+    unset VPSM_NO_SERVICE
+    UNITS_CHANGED=" vpsm-futures-view.service"
+    UNIT_SVC_STATE=failed PATH="$TMP/unit-bin:$PATH" restart_changed_units
+) >/dev/null 2>&1
+assert_file_contains "$UNIT_SYSCTL_LOG" "restart vpsm-futures-view" \
+    "restart_changed_units restarts failed FuturesView service"
+: >"$UNIT_SYSCTL_LOG"
+(
+    unset VPSM_NO_SERVICE
+    UNITS_CHANGED=" vpsm-futures-view.service"
+    UNIT_SVC_STATE=inactive PATH="$TMP/unit-bin:$PATH" restart_changed_units
+) >/dev/null 2>&1
+assert_file_not_contains "$UNIT_SYSCTL_LOG" "restart vpsm-futures-view" \
+    "restart_changed_units does not start intentionally stopped (inactive) service"
+db_write '.settings.futures_view.enabled = false'
+
+# 14f. update_sh uses newly installed scripts for unit rendering (not stale in-memory fv_render_unit)
+mkdir -p "$TMP/upd2-root/sh" "$TMP/upd2-pkg/vpsm-new" "$TMP/upd2-systemd"
+cp "$PROJECT/vpsm.sh" "$TMP/upd2-root/sh/"
+cp -r "$PROJECT/src" "$PROJECT/templates" "$PROJECT/systemd" "$TMP/upd2-root/sh/"
+cp "$PROJECT/vpsm.sh" "$PROJECT/install.sh" "$TMP/upd2-pkg/vpsm-new/"
+cp -r "$PROJECT/src" "$PROJECT/templates" "$PROJECT/systemd" "$TMP/upd2-pkg/vpsm-new/"
+printf 'owner/repo main\n' >"$TMP/upd2-root/repo"
+jq -n '{settings:{domain:"upd2.example.com",port:443,private_key:"priv",public_key:"pub",short_ids:["abcd1234"],reset_day:1,last_reset:"2026-01",expire:"",extra_subs:[],futures_view:{enabled:true,port:8888,cpu_limit:60,password:"",dce_api_key:"",dce_secret:""}},users:[]}' >"$TMP/upd2-root/users.json"
+tar -czf "$TMP/upd2.tgz" -C "$TMP/upd2-pkg" vpsm-new
+: >"$UNIT_SYSCTL_LOG"
+(
+    unset VPSM_NO_SERVICE
+    export VPSM_ROOT="$TMP/upd2-root"
+    export VPSM_SYSTEMD_DIR="$TMP/upd2-systemd"
+    export PATH="$TMP/unit-bin:$PATH"
+    # shellcheck disable=SC1091
+    . "$TMP/upd2-root/sh/src/core.sh"
+    for _l in xray traffic extra_sub sub caddy user firewall security manage futures_view check; do
+        # shellcheck disable=SC1090
+        . "$SH_DIR/src/$_l.sh"
+    done
+    # Simulate an older in-memory fv_render_unit that does NOT know about @FV_USER@
+    fv_render_unit() { sed -e "s#@ROOT@#$ROOT#g" -e "s#@PORT@#8888#g" "$SH_DIR/systemd/vpsm-futures-view.service"; }
+    dl() { cp "$TMP/upd2.tgz" "$2"; }
+    UNIT_SVC_STATE=activating update_sh
+) >/dev/null 2>&1
+assert_file_contains "$TMP/upd2-systemd/vpsm-futures-view.service" "User=vpsm-fv" \
+    "update_sh renders vpsm-futures-view.service using new scripts instead of stale in-memory functions"
+assert_file_not_contains "$TMP/upd2-systemd/vpsm-futures-view.service" "@FV_USER@" \
+    "update_sh leaves no unexpanded @FV_USER@ placeholder in installed unit"
+assert_file_contains "$UNIT_SYSCTL_LOG" "restart vpsm-futures-view" \
+    "update_sh restarts updated FuturesView unit even from activating state"
+
+# 14g. fv_sync_static_assets blocks parent symlink traversal and runs reader as vpsm-fv
+mkdir -p "$TMP/evil-target/static" "$FV_DIR" "$WWW_DIR"
+printf 'top-secret\n' >"$TMP/evil-target/static/secret.txt"
+printf 'keep-me\n' >"$WWW_DIR/index.html"
+ln -s "$TMP/evil-target" "$FV_DIR/web"
+fv_sync_static_assets >/dev/null 2>&1
+[[ ! -e $WWW_DIR/secret.txt && $(cat "$WWW_DIR/index.html") == "keep-me" ]] &&
+    ok_test "fv_sync_static_assets rejects symlinked parent FV_DIR/web without leaking or wiping WWW_DIR" ||
+    fail_test "fv_sync_static_assets rejects symlinked parent FV_DIR/web without leaking or wiping WWW_DIR"
+rm -rf "$FV_DIR"
+mkdir -p "$FV_DIR/web/static/assets"
+printf '<!doctype html>\n' >"$FV_DIR/web/static/index.html"
+printf 'console.log(1);\n' >"$FV_DIR/web/static/assets/app.js"
+ln -sf "$DB" "$FV_DIR/web/static/assets/leak.json"
+: >"$FV_RUNUSER_LOG"
+(
+    unset VPSM_NO_SERVICE
+    PATH="$TMP/fv-bin:$PATH" fv_sync_static_assets
+) >/dev/null 2>&1
+assert_file_contains "$FV_RUNUSER_LOG" "-u vpsm-fv -- env -i" \
+    "fv_sync_static_assets reads static assets unprivileged via runuser"
+[[ -f $WWW_DIR/index.html && -f $WWW_DIR/assets/app.js && ! -e $WWW_DIR/assets/leak.json ]] &&
+    ok_test "fv_sync_static_assets copies nested regular files and drops nested symlinks" ||
+    fail_test "fv_sync_static_assets copies nested regular files and drops nested symlinks"
+rm -rf "$FV_DIR" "$FV_HOME"
+
+# 14h. Legacy FV_DIR/.env migrates cleanly to root-owned FV_ENV_FILE
+mkdir -p "$FV_DIR"
+rm -f "$FV_ENV_FILE"
+printf 'CUSTOM_OPT=hello\nDCE_API_KEY="old-key"\n' >"$FV_DIR/.env"
+fv_set_dce_credentials_cmd "migrated-key-1234" "migrated-sec-5678" >/dev/null 2>&1
+assert_file_contains "$FV_ENV_FILE" "CUSTOM_OPT=hello" "legacy FV_DIR/.env custom variables migrate to FV_ENV_FILE"
+assert_file_contains "$FV_ENV_FILE" 'DCE_API_KEY="migrated-key-1234"' "migrated FV_ENV_FILE updates DCE credentials"
+[[ ! -e $FV_DIR/.env ]] &&
+    ok_test "legacy FV_DIR/.env is removed after migrating to FV_ENV_FILE" ||
+    fail_test "legacy FV_DIR/.env is removed after migrating to FV_ENV_FILE"
+fv_set_dce_credentials_cmd clear >/dev/null 2>&1
+rm -f "$FV_ENV_FILE"
+rm -rf "$FV_DIR"
+
+# 14i. Sensitive secrets are passed to jq via env rather than CLI arguments
+mkdir -p "$TMP/jq-spy-bin"
+REAL_JQ=$(command -v jq)
+cat >"$TMP/jq-spy-bin/jq" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"\$JQ_SPY_LOG"
+exec "$REAL_JQ" "\$@"
+EOF
+chmod 755 "$TMP/jq-spy-bin/jq"
+export JQ_SPY_LOG="$TMP/jq-spy.log"
+: >"$JQ_SPY_LOG"
+(
+    PATH="$TMP/jq-spy-bin:$PATH"
+    printf 'EnvOnlyKey9999\nEnvOnlySec8888\n' | fv_set_dce_credentials_cmd - >/dev/null 2>&1
+    printf 'EnvOnlyPwd7777\n' | fv_set_password_cmd - >/dev/null 2>&1
+)
+assert_file_not_contains "$JQ_SPY_LOG" "EnvOnlyKey9999" "DCE API key is not exposed in jq CLI arguments"
+assert_file_not_contains "$JQ_SPY_LOG" "EnvOnlySec8888" "DCE secret is not exposed in jq CLI arguments"
+assert_file_not_contains "$JQ_SPY_LOG" "EnvOnlyPwd7777" "FuturesView password is not exposed in jq CLI arguments"
+fv_set_dce_credentials_cmd clear >/dev/null 2>&1
+db_write '.settings.futures_view.password = ""'
+
+# 14j. extra_sub_fetch enforces kernel RLIMIT_FSIZE cap even when curl ignores --max-filesize
+mkdir -p "$TMP/big-bin"
+cat >"$TMP/big-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+out=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -o) out=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+head -c 16384 /dev/zero >"$out"
+printf '200\t'
+EOF
+chmod 755 "$TMP/big-bin/curl"
+if (
+    EXTRA_MAX_BYTES=4096
+    PATH="$TMP/big-bin:$PATH" extra_sub_fetch bigtest https://subscriptions.example/big.yaml
+) >/dev/null 2>&1; then
+    fail_test "extra_sub_fetch aborts oversized stream via RLIMIT_FSIZE"
+else
+    ok_test "extra_sub_fetch aborts oversized stream via RLIMIT_FSIZE"
+fi
 
 printf '\n%d tests passed, %d failed\n' "$PASS" "$FAIL"
 ((FAIL == 0))

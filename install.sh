@@ -228,9 +228,13 @@ if [[ -z ${VPSM_NO_SERVICE:-} ]]; then
     if port_in_use "$PORT" && ! systemctl is-active --quiet "$XRAY_SVC"; then
         die "Port $PORT is already in use; stop the conflicting service or choose another Xray port"
     fi
-    if ! getent passwd "$SVC_USER" >/dev/null; then
-        useradd --system --no-create-home --shell /usr/sbin/nologin "$SVC_USER" ||
-            useradd --system --no-create-home --shell /sbin/nologin "$SVC_USER" || die "Failed to create system user"
+    if ! getent group "$SVC_USER" >/dev/null 2>&1; then
+        groupadd --system "$SVC_USER" >/dev/null 2>&1 || die "Failed to create system group $SVC_USER"
+    fi
+    if ! getent passwd "$SVC_USER" >/dev/null 2>&1; then
+        useradd --system --gid "$SVC_USER" --no-create-home --shell /usr/sbin/nologin "$SVC_USER" >/dev/null 2>&1 ||
+            useradd --system --gid "$SVC_USER" --no-create-home --shell /sbin/nologin "$SVC_USER" >/dev/null 2>&1 ||
+            die "Failed to create system user $SVC_USER"
     fi
 fi
 

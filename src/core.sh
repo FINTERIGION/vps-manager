@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.5.4"
+VPSM_VERSION="1.5.5"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -47,6 +47,7 @@ CADDY_PORT=8443
 FV_PORT=8888
 FV_DIR="$ROOT/futures-view"
 FV_HOME="$ROOT/.fv-home"
+FV_ENV_FILE="$ROOT/futures-view.env"
 FV_SVC="vpsm-futures-view"
 FV_USER="vpsm-fv"
 FV_REPO="https://github.com/FINTERIGION/futures-view.git"
@@ -92,6 +93,12 @@ svc() {
 }
 svc_active() {
     [[ -z ${VPSM_NO_SERVICE:-} ]] && systemctl is-active --quiet "$1"
+}
+svc_should_restart() {
+    [[ -z ${VPSM_NO_SERVICE:-} ]] || return 1
+    local state
+    state=$(systemctl is-active "$1" 2>/dev/null || true)
+    [[ $state == active || $state == activating || $state == reloading || $state == failed ]]
 }
 svc_settled() {
     [[ -n ${VPSM_NO_SERVICE:-} ]] && return 0
@@ -166,9 +173,9 @@ db_init() {
     mkdir -p "$ROOT"
     (
         umask 077
-        jq -n --arg domain "$1" --argjson port "$2" --arg priv "$3" --arg pub "$4" \
+        VPSM_SECRET_PRIV="$3" jq -n --arg domain "$1" --argjson port "$2" --arg pub "$4" \
             --arg sid "$5" --argjson rd "$6" --arg lr "$(calc_last_reset "$6")" --arg expire "$7" \
-            '{settings:{domain:$domain,port:$port,private_key:$priv,public_key:$pub,
+            '{settings:{domain:$domain,port:$port,private_key:(env.VPSM_SECRET_PRIV // ""),public_key:$pub,
               short_ids:[$sid],reset_day:$rd,last_reset:$lr,expire:$expire,extra_subs:[]},users:[]}' >"$DB.new" &&
             mv -f "$DB.new" "$DB"
     ) || { rm -f "$DB.new"; err "Failed to create $DB"; }
@@ -403,6 +410,7 @@ fix_perms() {
     [[ -f $XRAY_CONF ]] && chown root:root "$XRAY_CONF" && chmod 600 "$XRAY_CONF"
     [[ -f $DB ]] && chmod 600 "$DB"
     [[ -f $ROOT/repo ]] && chmod 600 "$ROOT/repo"
+    [[ -f $FV_ENV_FILE && ! -L $FV_ENV_FILE ]] && chown root:root "$FV_ENV_FILE" && chmod 600 "$FV_ENV_FILE"
     if [[ -d $SUB_EXTRA ]]; then
         chown root:root "$SUB_EXTRA"
         chmod 700 "$SUB_EXTRA"
@@ -419,7 +427,7 @@ fix_perms() {
     fi
     mkdir -p "$CADDY_DIR/data" "$CADDY_DIR/config" "${CADDY_ADMIN_SOCK%/*}"
     find "$CADDY_DIR/data" "$CADDY_DIR/config" "${CADDY_ADMIN_SOCK%/*}" \
-        \( ! -user "$SVC_USER" -o ! -group "$SVC_USER" \) -exec chown "$SVC_USER:$SVC_USER" {} + 2>/dev/null
+        \( ! -user "$SVC_USER" -o ! -group "$SVC_USER" \) -exec chown -h "$SVC_USER:$SVC_USER" {} + 2>/dev/null
     chmod 700 "$CADDY_DIR/data" "$CADDY_DIR/config" "${CADDY_ADMIN_SOCK%/*}"
     return 0
 }
