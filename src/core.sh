@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsm - shared library (sourced by vpsm.sh / install.sh, do not execute directly)
 
-VPSM_VERSION="1.5.5"
+VPSM_VERSION="1.5.6"
 SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z ${VPSM_ROOT:-} && ${SH_DIR##*/} == sh && -f ${SH_DIR%/*}/users.json ]]; then
@@ -28,10 +28,11 @@ EXTRA_LOCK_FILE="$ROOT/.extra_lock"
 SUB_STAMP="$ROOT/.sub_stamp"
 SUB_RELOAD_PENDING="$ROOT/.sub_reload_pending"
 SUB_INFO_STAMP="$ROOT/.sub_info_stamp"
+SUB_INFO_DIRTY="$ROOT/.sub_info_dirty"
 SUB_REFRESH=1800
-# Clients re-read subscription-userinfo only every 12h (profile-update-interval),
-# so a userinfo-only change must not reload Caddy on every sync tick.
-SUB_INFO_REFRESH=21600
+# Throttle userinfo-only Caddy reloads on scheduled ticks while keeping manual
+# subscription refreshes reasonably fresh (15 minutes).
+SUB_INFO_REFRESH=900
 CERT_STAMP="$ROOT/.cert_stamp"
 CERT_CHECK_INTERVAL=21600
 CERT_WARN_DAYS=15

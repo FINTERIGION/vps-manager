@@ -90,7 +90,7 @@ traffic_evaluate() {
 }
 
 apply_state() {
-    local snap=$1 force=${2:-} skip_pull=${3:-} changes name op fallback="" restart_failed=""
+    local snap=$1 force=${2:-} skip_pull=${3:-} flush_info=${4:-} changes name op fallback="" restart_failed=""
     if [[ -z $skip_pull ]]; then
         traffic_pull || warn "Failed to read Xray traffic stats"
     fi
@@ -120,7 +120,7 @@ apply_state() {
         force=1
     fi
     [[ -n $RESET_DONE ]] && force=1
-    sub_regen "$force" || return 1
+    sub_regen "$force" "$flush_info" || return 1
     [[ -n $restart_failed ]] && return 1
     return 0
 }
@@ -138,7 +138,7 @@ extra_sub_path_ensure() {
 }
 
 sync_all() {
-    local snap
+    local flush_info=${1:-} snap
     fw_guard_ensure
     fw_ports_ensure
     extra_sub_path_ensure
@@ -149,5 +149,5 @@ sync_all() {
     fi
     cert_check_throttled
     snap=$(state_snapshot)
-    apply_state "$snap"
+    apply_state "$snap" "" "" "$flush_info"
 }

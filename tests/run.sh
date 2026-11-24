@@ -140,8 +140,10 @@ assert_file_contains "$CADDY_USERS/alice.conf" "upload=12345" "subscription info
 db_write '.users |= map(if .name == "alice" then .up = 0 else . end)'
 sub_regen
 
-# The subscription-userinfo header moves on every traffic tick, but clients only
-# re-read it every 12h, so a userinfo-only change must not reload Caddy each time.
+# The subscription-userinfo header moves on every traffic tick, so a
+# userinfo-only change is throttled to SUB_INFO_REFRESH (15m) on scheduled ticks
+# while still flushing after the window even without new traffic, or immediately
+# on a manual sync (flush).
 RELOAD_LOG="$TMP/reload.log"
 # Called from src/sub.sh, which shellcheck cannot follow through the sourced libs.
 # shellcheck disable=SC2329
@@ -149,7 +151,7 @@ caddy_reload() { printf 'x\n' >>"$RELOAD_LOG"; return 0; }
 reload_count() { wc -l <"$RELOAD_LOG" | tr -d '[:space:]'; }
 : >"$RELOAD_LOG"
 touch "$SUB_STAMP"
-rm -f "$SUB_INFO_STAMP" "$SUB_RELOAD_PENDING"
+rm -f "$SUB_INFO_STAMP" "$SUB_INFO_DIRTY" "$SUB_RELOAD_PENDING"
 sub_regen >/dev/null 2>&1
 : >"$RELOAD_LOG"
 
@@ -157,6 +159,8 @@ db_write '.users |= map(if .name == "alice" then .up = 4096 else . end)'
 sub_regen >/dev/null 2>&1
 assert_eq 1 "$(reload_count)" "the first userinfo change is published with one reload"
 assert_file_contains "$CADDY_USERS/alice.conf" "upload=4096" "the userinfo header reaches the route file"
+[[ ! -e $SUB_INFO_DIRTY ]] &&
+    ok_test "published userinfo change clears dirty marker" || fail_test "published userinfo change clears dirty marker"
 
 db_write '.users |= map(if .name == "alice" then .up = 8192 else . end)'
 sub_regen >/dev/null 2>&1
@@ -164,11 +168,39 @@ db_write '.users |= map(if .name == "alice" then .up = 12288 else . end)'
 sub_regen >/dev/null 2>&1
 assert_eq 1 "$(reload_count)" "userinfo-only changes inside the window do not reload Caddy"
 assert_file_contains "$CADDY_USERS/alice.conf" "upload=12288" "a throttled change still reaches the route file"
+[[ -f $SUB_INFO_DIRTY ]] &&
+    ok_test "throttled userinfo change sets dirty marker" || fail_test "throttled userinfo change sets dirty marker"
 
-touch -d '7 hours ago' "$SUB_INFO_STAMP"
+# Idle ticks inside the window keep the dirty marker without reloading
+touch -d '10 minutes ago' "$SUB_INFO_STAMP"
+sub_regen >/dev/null 2>&1
+assert_eq 1 "$(reload_count)" "idle ticks inside the 15m window do not reload Caddy"
+[[ -f $SUB_INFO_DIRTY ]] &&
+    ok_test "idle ticks inside the window preserve dirty marker" || fail_test "idle ticks inside the window preserve dirty marker"
+
+# Once the 15m window expires, a deferred userinfo change flushes even with no new traffic
+touch -d '16 minutes ago' "$SUB_INFO_STAMP"
+sub_regen >/dev/null 2>&1
+assert_eq 2 "$(reload_count)" "an aged dirty userinfo change reloads Caddy once without new traffic"
+[[ ! -e $SUB_INFO_DIRTY ]] &&
+    ok_test "aged dirty flush clears dirty marker" || fail_test "aged dirty flush clears dirty marker"
+
+# Subsequent idle ticks after flushing must not reload again
+touch -d '20 minutes ago' "$SUB_INFO_STAMP"
+sub_regen >/dev/null 2>&1
+assert_eq 2 "$(reload_count)" "subsequent idle ticks do not reload Caddy when clean"
+
+# Manual sync (flush) reloads immediately inside the 15m window when dirty, and skips when clean
 db_write '.users |= map(if .name == "alice" then .up = 16384 else . end)'
 sub_regen >/dev/null 2>&1
-assert_eq 2 "$(reload_count)" "an aged userinfo stamp reloads Caddy once"
+assert_eq 3 "$(reload_count)" "new traffic after an aged stamp reloads Caddy once"
+db_write '.users |= map(if .name == "alice" then .up = 20480 else . end)'
+sub_regen >/dev/null 2>&1
+assert_eq 3 "$(reload_count)" "userinfo change right after reload is throttled"
+sub_regen "" flush >/dev/null 2>&1
+assert_eq 4 "$(reload_count)" "manual flush reloads deferred userinfo immediately inside the window"
+sub_regen "" flush >/dev/null 2>&1
+assert_eq 4 "$(reload_count)" "manual flush skips Caddy reload when already clean"
 
 # A throwaway user stands in for structural changes, so the real users keep their
 # tokens and the yaml paths asserted above stay valid.

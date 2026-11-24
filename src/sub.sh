@@ -120,7 +120,7 @@ sub_struct_differs() {
 }
 
 sub_regen() {
-    local force=${1:-} age stage changed="" full="" reload_pending="" f b fname expire
+    local force=${1:-} flush_info=${2:-} age stage changed="" full="" reload_pending="" info_dirty="" f b fname expire
     local name uuid token quota up down yamls=() any="" struct=""
     if [[ -n $force || ! -f $SUB_STAMP ]]; then
         full=1
@@ -129,6 +129,7 @@ sub_regen() {
         ((age >= SUB_REFRESH)) && full=1
     fi
     [[ -f $SUB_RELOAD_PENDING ]] && reload_pending=1
+    [[ -f $SUB_INFO_DIRTY ]] && info_dirty=1
     stage=$(mktemp -d "$ROOT/.stage.XXXXXX") || return 1
     mkdir -p "$stage/users"
     fname=$(urlencode "$(sub_name)")
@@ -230,17 +231,20 @@ PY
     rm -rf "$stage"
 
     # Decouple "route files changed" from "Caddy must reload": the userinfo header
-    # moves on every traffic tick, but clients only re-read it every 12h, so a
-    # userinfo-only change is reloaded at most once per SUB_INFO_REFRESH window.
+    # moves on every traffic tick, so a userinfo-only change is reloaded at most
+    # once per SUB_INFO_REFRESH window on scheduled syncs, while SUB_INFO_DIRTY
+    # ensures deferred changes still flush after the window even without new
+    # traffic (or immediately on a manual sync with flush_info set).
     if [[ -n $force || -n $struct ]]; then
         changed=1
-    elif [[ -n $any ]]; then
-        if [[ ! -f $SUB_INFO_STAMP ]] ||
+    elif [[ -n $any || -n $info_dirty ]]; then
+        if [[ -n $flush_info || ! -f $SUB_INFO_STAMP ]] ||
             (($(date +%s) - $(stat -c %Y "$SUB_INFO_STAMP") >= SUB_INFO_REFRESH)); then
             changed=1
+        else
+            touch "$SUB_INFO_DIRTY"
         fi
     fi
-    [[ -n $changed ]] && touch "$SUB_INFO_STAMP"
 
     if [[ -n $changed || -n $reload_pending ]]; then
         if ! caddy_reload; then
@@ -248,7 +252,8 @@ PY
             [[ -n $full ]] && rm -f "$SUB_STAMP"
             return 1
         fi
-        rm -f "$SUB_RELOAD_PENDING"
+        touch "$SUB_INFO_STAMP"
+        rm -f "$SUB_RELOAD_PENDING" "$SUB_INFO_DIRTY"
     fi
     return 0
 }

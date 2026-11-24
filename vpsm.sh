@@ -319,7 +319,7 @@ menu() {
             13) run_locked update_sh && exec "$ROOT/sh/vpsm.sh" ;;
             14) run_locked update_kernel ;;
             15) enable_bbr ;;
-            16) run_locked sync_all; ok "Traffic and status synchronized" ;;
+            16) run_locked sync_all flush; ok "Traffic and status synchronized" ;;
             17) futures_view_menu; continue ;;
             18) run_locked do_uninstall; [[ -f $DB ]] || exit 0 ;;
             0 | q | Q) exit 0 ;;
@@ -410,7 +410,12 @@ main() {
         fv | futures-view) run_locked fv_cmd "$@" ;;
         extra-refresh) extra_sub_async_refresh ;;
         regen) run_locked regen_all ;;
-        sync) run_locked sync_all ;;
+        sync)
+            case ${1:-} in
+                --scheduled) run_locked sync_all ;;
+                "") run_locked sync_all flush ;;
+                *) err "Usage: vpsm sync" ;;
+            esac ;;
         status | s) show_status ;;
         # Read-only, so deliberately not run_locked: it must stay usable while a
         # sync is in progress and must never contend for the lock.
